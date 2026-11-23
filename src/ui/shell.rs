@@ -14,7 +14,6 @@ use crate::ui::log_drawer::LogDrawer;
 use crate::ui::preview_view::PreviewView;
 use crate::ui::resizer_view::ResizerView;
 use crate::ui::settings_view::SettingsView;
-use crate::ui::theme::ThemeMode;
 
 pub struct ShellView {
     state: Entity<AppState>,
@@ -83,17 +82,6 @@ impl ShellView {
         });
     }
 
-    fn toggle_theme(&self, cx: &mut Context<Self>) {
-        self.state.update(cx, |s, cx| {
-            s.config.theme = match s.config.theme {
-                ThemeMode::Dark => ThemeMode::Light,
-                ThemeMode::Light => ThemeMode::Dark,
-            };
-            let _ = s.save_config();
-            cx.notify();
-        });
-    }
-
     fn toggle_rail(&self, cx: &mut Context<Self>) {
         self.state.update(cx, |s, cx| {
             s.config.rail_pinned = !s.config.rail_pinned;
@@ -112,10 +100,6 @@ impl Render for ShellView {
         let active_tab = s.active_tab;
         let is_admin = s.is_admin;
         let sys_state = s.system_state;
-        let theme_btn_label = match s.config.theme {
-            ThemeMode::Dark => "Light Mode",
-            ThemeMode::Light => "Dark Mode",
-        };
         let last_error = s.last_error.clone();
         let last_notice = s.last_notice.clone();
 
@@ -277,7 +261,62 @@ impl Render for ShellView {
                                             })),
                                     ),
                             ),
-                    ),
+                    )
+                    // Bottom-left About App block
+                    .child(if collapsed {
+                        div()
+                            .w_full()
+                            .py(px(6.0))
+                            .border_t_1()
+                            .border_color(theme.line)
+                            .flex()
+                            .justify_center()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(theme.text_3)
+                                    .child(format!("v{}", env!("CARGO_PKG_VERSION"))),
+                            )
+                            .into_any_element()
+                    } else {
+                        div()
+                            .w_full()
+                            .p(px(10.0))
+                            .rounded(px(6.0))
+                            .bg(theme.surface_2)
+                            .border_1()
+                            .border_color(theme.line)
+                            .flex()
+                            .flex_col()
+                            .gap(px(4.0))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap(px(6.0))
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .text_color(theme.text)
+                                            .child("About App"),
+                                    )
+                                    .child(StatusPill::new(
+                                        format!("v{}", env!("CARGO_PKG_VERSION")),
+                                        BadgeTone::Accent,
+                                        theme,
+                                    )),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.text_3)
+                                    .child("SegoeUI Changer · Rust + GPUI + FontForge"),
+                            )
+                            .into_any_element()
+                    }),
             )
             // Main Column (Top Bar + Banner + View + LogDrawer)
             .child(
@@ -324,18 +363,7 @@ impl Render for ShellView {
                                         },
                                         theme,
                                     ))
-                                    .child(StatusPill::new(sys_state.label(), sys_tone, theme))
-                                    .child(
-                                        VantageButton::new("theme-toggle", theme_btn_label, theme)
-                                            .icon(match s.config.theme {
-                                                ThemeMode::Dark => "icons/sun.svg",
-                                                ThemeMode::Light => "icons/moon.svg",
-                                            })
-                                            .variant(ButtonVariant::Secondary)
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.toggle_theme(cx)
-                                            })),
-                                    ),
+                                    .child(StatusPill::new(sys_state.label(), sys_tone, theme)),
                             ),
                     )
                     // Error / Notice Banner
@@ -348,9 +376,11 @@ impl Render for ShellView {
                                 .border_b_1()
                                 .border_color(theme.err.opacity(0.4))
                                 .flex()
+                                .flex_wrap()
                                 .items_center()
                                 .justify_between()
-                                .child(div().text_xs().text_color(theme.err).child(err))
+                                .gap(px(8.0))
+                                .child(div().min_w_0().text_xs().text_color(theme.err).child(err))
                                 .child(
                                     VantageButton::new("dismiss-err", "Dismiss", theme)
                                         .variant(ButtonVariant::Ghost)
@@ -372,12 +402,15 @@ impl Render for ShellView {
                                 .border_b_1()
                                 .border_color(theme.ok.opacity(0.4))
                                 .flex()
+                                .flex_wrap()
                                 .items_center()
                                 .justify_between()
-                                .child(div().text_xs().text_color(theme.ok).child(note.clone()))
+                                .gap(px(8.0))
+                                .child(div().min_w_0().text_xs().text_color(theme.ok).child(note.clone()))
                                 .child(
                                     div()
                                         .flex()
+                                        .flex_wrap()
                                         .items_center()
                                         .gap(px(6.0))
                                         .when(note.contains("REBOOT REQUIRED"), |d| {
@@ -398,21 +431,24 @@ impl Render for ShellView {
                                             .child(
                                                 VantageButton::new("reboot-now-btn", "Reboot Now", theme)
                                                     .variant(ButtonVariant::Primary)
-                                                    .on_click(|_, _, _| {
-                                                        let ok = rfd::MessageDialog::new()
-                                                            .set_level(rfd::MessageLevel::Warning)
-                                                            .set_title("Reboot System")
-                                                            .set_description(
-                                                                "Save any open work before restarting. Reboot Windows now?",
-                                                            )
-                                                            .set_buttons(rfd::MessageButtons::YesNo)
-                                                            .show()
-                                                            == rfd::MessageDialogResult::Yes;
-                                                        if ok {
-                                                            let _ = std::process::Command::new("shutdown")
-                                                                .args(["/r", "/t", "3"])
-                                                                .spawn();
-                                                        }
+                                                    .on_click(|_, _, cx| {
+                                                        cx.spawn(async move |_cx| {
+                                                            let ok = rfd::MessageDialog::new()
+                                                                .set_level(rfd::MessageLevel::Warning)
+                                                                .set_title("Reboot System")
+                                                                .set_description(
+                                                                    "Save any open work before restarting. Reboot Windows now?",
+                                                                )
+                                                                .set_buttons(rfd::MessageButtons::YesNo)
+                                                                .show()
+                                                                == rfd::MessageDialogResult::Yes;
+                                                            if ok {
+                                                                let _ = std::process::Command::new("shutdown")
+                                                                    .args(["/r", "/t", "3"])
+                                                                    .spawn();
+                                                            }
+                                                        })
+                                                        .detach();
                                                     }),
                                             )
                                         })

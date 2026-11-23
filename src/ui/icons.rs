@@ -25,6 +25,7 @@ impl AssetSource for EmbeddedAssets {
             "icons/shield-check.svg" => Some(include_bytes!("../../assets/icons/shield-check.svg")),
             "icons/refresh-cw.svg" => Some(include_bytes!("../../assets/icons/refresh-cw.svg")),
             "icons/panel-left.svg" => Some(include_bytes!("../../assets/icons/panel-left.svg")),
+            "icons/copy.svg" => Some(include_bytes!("../../assets/icons/copy.svg")),
             _ => None,
         };
         Ok(bytes.map(Cow::Borrowed))

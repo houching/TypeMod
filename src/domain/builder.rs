@@ -231,7 +231,7 @@ struct SliceRequest<'a> {
     sel: &'a FontFamilySelection,
     prefix: &'a str,
     slicer_script: &'a Path,
-    ff_exe: &'a Path,
+    python_exe: Option<&'a Path>,
     base_progress: f32,
     progress_span: f32,
     extra_ranges: &'a [(u32, u32)],
@@ -247,7 +247,7 @@ fn resolve_family_weights(
         sel,
         prefix,
         slicer_script,
-        ff_exe,
+        python_exe,
         base_progress,
         progress_span,
         extra_ranges,
@@ -288,8 +288,8 @@ fn resolve_family_weights(
         return Ok((vec![lt, sl, r, sb, b, blk], Vec::new()));
     }
 
-    let python_exe = ensure_fonttools_python(ff_exe, |line| {
-        on_event(BuildProgressEvent::Log(line));
+    let python_exe = python_exe.ok_or_else(|| {
+        anyhow::anyhow!("Python 'fonttools' executable was not resolved for variable font slicing.")
     })?;
     check_cancelled(cancel)?;
 
@@ -309,7 +309,7 @@ fn resolve_family_weights(
     let req_path = work_dir.join(format!("slicer_{prefix}.json"));
     fs::write(&req_path, serde_json::to_string(&req)?)?;
 
-    let child = Command::new(&python_exe)
+    let child = Command::new(python_exe)
         .arg("-u")
         .arg(slicer_script)
         .arg(&req_path)
@@ -412,85 +412,186 @@ pub fn run_build_and_apply(
         status: "Resolving & slicing font weights...".to_string(),
     });
 
-    let extra_ranges = config.secondary_script.ranges();
-    let (l_paths, t1) = resolve_family_weights(
-        SliceRequest {
-            work_dir: &work_dir,
-            sel: &config.latin,
-            prefix: "lat",
-            slicer_script: &slicer_script,
-            ff_exe,
-            base_progress: 0.12,
-            progress_span: 0.08,
-            extra_ranges,
-            cancel,
-        },
-        &mut on_event,
-    )?;
-    let (k_paths, t2) = if config.khmer.has_regular()
-        && config.khmer.regular == config.latin.regular
-    {
+    let extra_ranges_vec = config.active_script_ranges();
+    let extra_ranges = extra_ranges_vec.as_slice();
+    let active_scripts = config.active_scripts();
+    let extra_scripts: Vec<_> = active_scripts.iter().copied().skip(1).collect();
+    let khmer_same_as_latin =
+        config.khmer.has_regular() && config.khmer.regular == config.latin.regular;
+    let italic_enabled = config.enable_italic && config.latin_italic.has_regular();
+    let any_extra_var = extra_scripts.iter().any(|&sc| {
+        config
+            .script_font(sc)
+            .is_some_and(|f| f.has_regular() && f.is_variable && f.regular != config.latin.regular)
+            || (italic_enabled
+                && config
+                    .script_italic_font(sc)
+                    .is_some_and(|f| f.has_regular() && f.is_variable))
+    });
+    let any_variable = (config.latin.has_regular() && config.latin.is_variable)
+        || (!khmer_same_as_latin && config.khmer.has_regular() && config.khmer.is_variable)
+        || (italic_enabled
+            && ((config.latin_italic.has_regular() && config.latin_italic.is_variable)
+                || (config.khmer_italic.has_regular() && config.khmer_italic.is_variable)))
+        || any_extra_var;
+
+    let slicer_python = if any_variable {
+        Some(ensure_fonttools_python(ff_exe, |line| {
+            on_event(BuildProgressEvent::Log(line));
+        })?)
+    } else {
+        None
+    };
+
+    if khmer_same_as_latin {
         on_event(BuildProgressEvent::Log(
             "[Slicer] Secondary font matches Latin font; using single-font build mode.".to_string(),
         ));
-        (vec!["NONE".to_string(); 6], Vec::new())
-    } else {
-        resolve_family_weights(
-            SliceRequest {
-                work_dir: &work_dir,
-                sel: &config.khmer,
-                prefix: "khm",
-                slicer_script: &slicer_script,
-                ff_exe,
-                base_progress: 0.20,
-                progress_span: 0.08,
-                extra_ranges,
-                cancel,
-            },
-            &mut on_event,
-        )?
-    };
+    }
+
+    let (l_res, k_res, li_res, ki_res) = std::thread::scope(|s| {
+        let (tx, rx) = std::sync::mpsc::channel::<BuildProgressEvent>();
+
+        let run_slice = |sel: &FontFamilySelection,
+                         prefix: &str,
+                         base_progress: f32,
+                         progress_span: f32,
+                         tx: std::sync::mpsc::Sender<BuildProgressEvent>| {
+            resolve_family_weights(
+                SliceRequest {
+                    work_dir: &work_dir,
+                    sel,
+                    prefix,
+                    slicer_script: &slicer_script,
+                    python_exe: slicer_python.as_deref(),
+                    base_progress,
+                    progress_span,
+                    extra_ranges,
+                    cancel,
+                },
+                &mut |ev| {
+                    let _ = tx.send(ev);
+                },
+            )
+        };
+
+        let tx1 = tx.clone();
+        let h_lat = s.spawn(move || run_slice(&config.latin, "lat", 0.12, 0.08, tx1));
+
+        let tx2 = tx.clone();
+        let h_khm = (!khmer_same_as_latin)
+            .then(|| s.spawn(move || run_slice(&config.khmer, "khm", 0.20, 0.08, tx2)));
+
+        let tx3 = tx.clone();
+        let h_lati = italic_enabled
+            .then(|| s.spawn(move || run_slice(&config.latin_italic, "lati", 0.28, 0.01, tx3)));
+
+        let tx4 = tx.clone();
+        let h_khmi = italic_enabled
+            .then(|| s.spawn(move || run_slice(&config.khmer_italic, "khmi", 0.29, 0.01, tx4)));
+
+        drop(tx);
+        for ev in rx {
+            on_event(ev);
+        }
+
+        let l_res = h_lat
+            .join()
+            .unwrap_or_else(|_| Err(anyhow::anyhow!("Latin slicer thread panicked")));
+        let k_res = match h_khm {
+            Some(h) => h
+                .join()
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("Secondary slicer thread panicked"))),
+            None => Ok((vec!["NONE".to_string(); 6], Vec::new())),
+        };
+        let li_res = match h_lati {
+            Some(h) => h
+                .join()
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("Latin italic slicer thread panicked"))),
+            None => Ok((Vec::new(), Vec::new())),
+        };
+        let ki_res = match h_khmi {
+            Some(h) => h
+                .join()
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("Secondary italic slicer thread panicked"))),
+            None => Ok((Vec::new(), Vec::new())),
+        };
+        (l_res, k_res, li_res, ki_res)
+    });
+
+    let (l_paths, t1) = l_res?;
+    let (k_paths, t2) = k_res?;
+    let (li_paths, t3) = li_res?;
+    let (ki_paths, t4) = ki_res?;
     temp_files.extend(t1);
     temp_files.extend(t2);
+    temp_files.extend(t3);
+    temp_files.extend(t4);
 
-    let khmer_enabled = k_paths.iter().any(|p| p != "NONE");
-    let italic_enabled = config.enable_italic && config.latin_italic.has_regular();
+    let mut extra_normal_map: std::collections::HashMap<&'static str, Vec<String>> =
+        std::collections::HashMap::new();
+    let mut extra_italic_map: std::collections::HashMap<&'static str, Vec<String>> =
+        std::collections::HashMap::new();
 
-    let (li_paths, ki_paths) = if italic_enabled {
-        let (li, t3) = resolve_family_weights(
-            SliceRequest {
-                work_dir: &work_dir,
-                sel: &config.latin_italic,
-                prefix: "lati",
-                slicer_script: &slicer_script,
-                ff_exe,
-                base_progress: 0.28,
-                progress_span: 0.01,
-                extra_ranges,
-                cancel,
-            },
-            &mut on_event,
-        )?;
-        let (ki, t4) = resolve_family_weights(
-            SliceRequest {
-                work_dir: &work_dir,
-                sel: &config.khmer_italic,
-                prefix: "khmi",
-                slicer_script: &slicer_script,
-                ff_exe,
-                base_progress: 0.29,
-                progress_span: 0.01,
-                extra_ranges,
-                cancel,
-            },
-            &mut on_event,
-        )?;
-        temp_files.extend(t3);
-        temp_files.extend(t4);
-        (li, ki)
-    } else {
-        (Vec::new(), Vec::new())
-    };
+    for sc in &extra_scripts {
+        if let Some(sel) = config.script_font(*sc)
+            && sel.has_regular()
+            && sel.regular != config.latin.regular
+        {
+            let prefix = format!("ext_{}", sc.label().to_ascii_lowercase());
+            let (paths, temps) = resolve_family_weights(
+                SliceRequest {
+                    work_dir: &work_dir,
+                    sel,
+                    prefix: &prefix,
+                    slicer_script: &slicer_script,
+                    python_exe: slicer_python.as_deref(),
+                    base_progress: 0.28,
+                    progress_span: 0.01,
+                    extra_ranges,
+                    cancel,
+                },
+                &mut on_event,
+            )?;
+            temp_files.extend(temps);
+            for (i, (w, _)) in NORMAL_WEIGHT_SPECS.iter().enumerate() {
+                if let Some(p) = paths.get(i)
+                    && p != "NONE"
+                {
+                    extra_normal_map.entry(*w).or_default().push(p.clone());
+                }
+            }
+        }
+        if italic_enabled
+            && let Some(sel) = config.script_italic_font(*sc)
+            && sel.has_regular()
+            && sel.regular != config.latin_italic.regular
+        {
+            let prefix = format!("exti_{}", sc.label().to_ascii_lowercase());
+            let (paths, temps) = resolve_family_weights(
+                SliceRequest {
+                    work_dir: &work_dir,
+                    sel,
+                    prefix: &prefix,
+                    slicer_script: &slicer_script,
+                    python_exe: slicer_python.as_deref(),
+                    base_progress: 0.29,
+                    progress_span: 0.01,
+                    extra_ranges,
+                    cancel,
+                },
+                &mut on_event,
+            )?;
+            temp_files.extend(temps);
+            for (i, (w, _)) in ITALIC_WEIGHT_SPECS.iter().enumerate() {
+                if let Some(p) = paths.get(i)
+                    && p != "NONE"
+                {
+                    extra_italic_map.entry(*w).or_default().push(p.clone());
+                }
+            }
+        }
+    }
     check_cancelled(cancel)?;
 
     if let Some(reg) = &config.latin.regular {
@@ -515,20 +616,20 @@ pub fn run_build_and_apply(
         status: "Building replacement fonts...".to_string(),
     });
 
-    let engine_name = match config.merging_mode {
-        MergingMode::Visual => "engine.py",
-        MergingMode::GridSync => "grid_sync_engine.py",
-    };
+    let core_script = scripts.join("engine_core.py");
     run_fontforge_engine(
         EngineInvocation {
             ff_exe,
-            script: &scripts.join(engine_name),
+            script: &core_script,
             work_dir: &work_dir,
             latin_paths: &l_paths,
             khmer_paths: &k_paths,
             mode: config.merging_mode,
-            khmer_enabled,
+            italic: false,
+            base_progress: 0.30,
+            progress_span: 0.60,
             extra_ranges,
+            extra_font_map: &extra_normal_map,
             cancel,
         },
         &mut full_log,
@@ -538,23 +639,22 @@ pub fn run_build_and_apply(
     if italic_enabled {
         check_cancelled(cancel)?;
         on_event(BuildProgressEvent::Step {
-            progress: 0.92,
+            progress: 0.90,
             status: "Building Italic weights...".to_string(),
         });
-        let ital_name = match config.merging_mode {
-            MergingMode::Visual => "engine_italic.py",
-            MergingMode::GridSync => "grid_sync_engine_italic.py",
-        };
         run_fontforge_engine(
             EngineInvocation {
                 ff_exe,
-                script: &scripts.join(ital_name),
+                script: &core_script,
                 work_dir: &work_dir,
                 latin_paths: &li_paths,
                 khmer_paths: &ki_paths,
                 mode: config.merging_mode,
-                khmer_enabled,
+                italic: true,
+                base_progress: 0.90,
+                progress_span: 0.05,
                 extra_ranges,
+                extra_font_map: &extra_italic_map,
                 cancel,
             },
             &mut full_log,
@@ -658,6 +758,24 @@ pub fn run_build_and_apply(
     Ok(())
 }
 
+const NORMAL_WEIGHT_SPECS: [(&str, &str); 6] = [
+    ("Light", "segoeuil.ttf"),
+    ("Semilight", "segoeuisl.ttf"),
+    ("Regular", "segoeui.ttf"),
+    ("Semibold", "seguisb.ttf"),
+    ("Bold", "segoeuib.ttf"),
+    ("Black", "seguibl.ttf"),
+];
+
+const ITALIC_WEIGHT_SPECS: [(&str, &str); 6] = [
+    ("Light Italic", "seguili.ttf"),
+    ("Semilight Italic", "seguisli.ttf"),
+    ("Italic", "segoeuii.ttf"),
+    ("Semibold Italic", "seguisbi.ttf"),
+    ("Bold Italic", "segoeuiz.ttf"),
+    ("Black Italic", "seguibli.ttf"),
+];
+
 struct EngineInvocation<'a> {
     ff_exe: &'a Path,
     script: &'a Path,
@@ -665,9 +783,18 @@ struct EngineInvocation<'a> {
     latin_paths: &'a [String],
     khmer_paths: &'a [String],
     mode: MergingMode,
-    khmer_enabled: bool,
+    italic: bool,
+    base_progress: f32,
+    progress_span: f32,
     extra_ranges: &'a [(u32, u32)],
+    extra_font_map: &'a std::collections::HashMap<&'static str, Vec<String>>,
     cancel: &'a AtomicBool,
+}
+
+enum WorkerMsg {
+    Log { weight: &'static str, line: String },
+    Done { weight: &'static str },
+    Err(String),
 }
 
 fn run_fontforge_engine(
@@ -675,50 +802,141 @@ fn run_fontforge_engine(
     full_log: &mut String,
     on_event: &mut impl FnMut(BuildProgressEvent),
 ) -> anyhow::Result<()> {
-    let ranges_json = serde_json::to_string(inv.extra_ranges).unwrap_or_else(|_| "[]".to_string());
-    let mut cmd = Command::new(inv.ff_exe);
-    cmd.arg("-u")
-        .arg(inv.script)
-        .args(inv.latin_paths)
-        .args(inv.khmer_paths)
-        .env("SEGOEUI_EXTRA_RANGES", ranges_json)
-        .current_dir(inv.work_dir)
-        .creation_flags(CREATE_NO_WINDOW)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    let specs = if inv.italic {
+        &ITALIC_WEIGHT_SPECS
+    } else {
+        &NORMAL_WEIGHT_SPECS
+    };
+    let jobs: Vec<(&'static str, &str, &str, &'static str)> = specs
+        .iter()
+        .enumerate()
+        .filter_map(|(i, (weight, sys_ttf))| {
+            let lat = inv.latin_paths.get(i).map(String::as_str).unwrap_or("NONE");
+            let ara = inv.khmer_paths.get(i).map(String::as_str).unwrap_or("NONE");
+            (lat != "NONE").then_some((*weight, lat, ara, *sys_ttf))
+        })
+        .collect();
 
-    if inv
-        .script
-        .file_name()
-        .is_some_and(|n| n == "engine.py" || n == "engine_italic.py")
-    {
-        cmd.arg(inv.mode.as_arg());
+    if jobs.is_empty() {
+        return Ok(());
     }
 
-    let child = cmd.spawn()?;
+    let total_jobs = jobs.len();
+    let worker_count = total_jobs
+        .min(std::thread::available_parallelism().map_or(2, |n| n.get()))
+        .clamp(1, 4);
+    let ranges_json = serde_json::to_string(inv.extra_ranges).unwrap_or_else(|_| "[]".to_string());
+    let extra_fonts_json =
+        serde_json::to_string(inv.extra_font_map).unwrap_or_else(|_| "{}".to_string());
+    let mode_arg = inv.mode.as_arg();
+    let queue = std::sync::Mutex::new(jobs.into_iter().collect::<std::collections::VecDeque<_>>());
+    let (tx, rx) = std::sync::mpsc::channel::<WorkerMsg>();
+
+    on_event(BuildProgressEvent::Log(format!(
+        "[Engine] Building {total_jobs} weights across {worker_count} parallel FontForge worker(s)..."
+    )));
+
     let mut suppressed_subtable_warnings = 0usize;
-    let status = wait_child_with_cancel(child, inv.cancel, |is_err, line| {
-        full_log.push_str(&line);
-        full_log.push('\n');
-        if !is_err
-            && let Some((progress, status)) = parse_engine_progress(&line, inv.khmer_enabled)
-        {
-            on_event(BuildProgressEvent::Step { progress, status });
+    let mut completed = 0usize;
+    let mut first_error: Option<String> = None;
+
+    std::thread::scope(|s| {
+        for _ in 0..worker_count {
+            let queue = &queue;
+            let tx = tx.clone();
+            let ranges_json = &ranges_json;
+            let extra_fonts_json = &extra_fonts_json;
+            s.spawn(move || {
+                loop {
+                    if inv.cancel.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let job = queue.lock().ok().and_then(|mut q| q.pop_front());
+                    let Some((weight, lat, ara, sys_ttf)) = job else {
+                        break;
+                    };
+
+                    let mut cmd = Command::new(inv.ff_exe);
+                    cmd.arg("-u")
+                        .arg(inv.script)
+                        .args(["--single", weight, lat, ara, sys_ttf, mode_arg])
+                        .env("SEGOEUI_EXTRA_RANGES", ranges_json)
+                        .env("SEGOEUI_EXTRA_FONT_MAP", extra_fonts_json)
+                        .current_dir(inv.work_dir)
+                        .creation_flags(CREATE_NO_WINDOW)
+                        .stdout(Stdio::piped())
+                        .stderr(Stdio::piped());
+
+                    let child = match cmd.spawn() {
+                        Ok(c) => c,
+                        Err(e) => {
+                            let _ = tx.send(WorkerMsg::Err(format!(
+                                "Failed to spawn FontForge for {weight}: {e}"
+                            )));
+                            break;
+                        }
+                    };
+
+                    let res = wait_child_with_cancel(child, inv.cancel, |_is_err, line| {
+                        let _ = tx.send(WorkerMsg::Log { weight, line });
+                    });
+
+                    match res {
+                        Ok(st) if st.success() => {
+                            let _ = tx.send(WorkerMsg::Done { weight });
+                        }
+                        Ok(st) => {
+                            let _ = tx.send(WorkerMsg::Err(format!(
+                                "FontForge worker for {weight} exited with status {st}"
+                            )));
+                            break;
+                        }
+                        Err(e) => {
+                            let _ = tx.send(WorkerMsg::Err(e.to_string()));
+                            break;
+                        }
+                    }
+                }
+            });
         }
-        if line.contains("making the whole subtable invalid") {
-            suppressed_subtable_warnings += 1;
-            return;
+        drop(tx);
+
+        for msg in rx {
+            match msg {
+                WorkerMsg::Log { weight, line } => {
+                    full_log.push_str(&format!("[{weight}] {line}\n"));
+                    if line.contains("making the whole subtable invalid") {
+                        suppressed_subtable_warnings += 1;
+                        continue;
+                    }
+                    on_event(BuildProgressEvent::Log(format!("[{weight}] {line}")));
+                }
+                WorkerMsg::Done { weight } => {
+                    completed += 1;
+                    let frac = completed as f32 / total_jobs as f32;
+                    on_event(BuildProgressEvent::Step {
+                        progress: inv.base_progress + inv.progress_span * frac,
+                        status: format!("Built {weight} ({completed}/{total_jobs})"),
+                    });
+                }
+                WorkerMsg::Err(err) => {
+                    if first_error.is_none() {
+                        first_error = Some(err);
+                    }
+                }
+            }
         }
-        on_event(BuildProgressEvent::Log(line));
-    })?;
+    });
+
     if suppressed_subtable_warnings > 0 {
         on_event(BuildProgressEvent::Log(format!(
             "[Engine] Suppressed {suppressed_subtable_warnings} unused-subtable warnings (see build log file for full details)."
         )));
     }
 
-    if !status.success() {
-        anyhow::bail!("FontForge engine failed with exit status {status}");
+    check_cancelled(inv.cancel)?;
+    if let Some(err) = first_error {
+        anyhow::bail!("{err}");
     }
     Ok(())
 }

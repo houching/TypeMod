@@ -105,13 +105,6 @@ impl SettingsView {
     }
 
     fn package_zip_now(&self, cx: &mut Context<Self>) {
-        let Some(dest_zip) = rfd::FileDialog::new()
-            .add_filter("SegoeUI Mod Package", &["zip"])
-            .set_file_name("segoeui-mod-pack.zip")
-            .save_file()
-        else {
-            return;
-        };
         let (lat, khm) = {
             let cfg = &self.state.read(cx).config;
             (
@@ -119,24 +112,41 @@ impl SettingsView {
                 cfg.khmer.display_name.clone(),
             )
         };
-        match export_mod_package(&dest_zip, lat.as_deref(), khm.as_deref()) {
-            Ok(count) => {
-                self.state.update(cx, |s, cx| {
-                    s.last_error = None;
-                    s.last_notice = Some(format!(
-                        "Packaged {count} modded fonts into {}.",
-                        dest_zip.display()
-                    ));
-                    cx.notify();
-                });
-            }
-            Err(e) => {
-                self.state.update(cx, |s, cx| {
-                    s.last_error = Some(format!("Package failed: {e}"));
-                    cx.notify();
-                });
-            }
-        }
+        cx.spawn(async move |this, cx| {
+            let Some(dest_zip) = rfd::FileDialog::new()
+                .add_filter("SegoeUI Mod Package", &["zip"])
+                .set_file_name("segoeui-mod-pack.zip")
+                .save_file()
+            else {
+                return;
+            };
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    export_mod_package(&dest_zip, lat.as_deref(), khm.as_deref())
+                        .map(|count| (count, dest_zip))
+                })
+                .await;
+            let _ = this.update(cx, |view, cx| match result {
+                Ok((count, dest_zip)) => {
+                    view.state.update(cx, |s, cx| {
+                        s.last_error = None;
+                        s.last_notice = Some(format!(
+                            "Packaged {count} modded fonts into {}.",
+                            dest_zip.display()
+                        ));
+                        cx.notify();
+                    });
+                }
+                Err(e) => {
+                    view.state.update(cx, |s, cx| {
+                        s.last_error = Some(format!("Package failed: {e}"));
+                        cx.notify();
+                    });
+                }
+            });
+        })
+        .detach();
     }
 
     fn import_zip_now(&self, cx: &mut Context<Self>) {
@@ -149,31 +159,40 @@ impl SettingsView {
             }
             return;
         }
-        let Some(src_zip) = rfd::FileDialog::new()
-            .add_filter("SegoeUI Mod Package", &["zip"])
-            .pick_file()
-        else {
-            return;
-        };
-        match import_and_apply_package(&src_zip) {
-            Ok(count) => {
-                self.state.update(cx, |s, cx| {
-                    s.system_state = check_system_state();
-                    s.last_error = None;
-                    s.last_notice = Some(format!(
-                        "Imported & applied {count} fonts from {}. REBOOT REQUIRED to apply system-wide.",
-                        src_zip.display()
-                    ));
-                    cx.notify();
-                });
-            }
-            Err(e) => {
-                self.state.update(cx, |s, cx| {
-                    s.last_error = Some(format!("Import failed: {e}"));
-                    cx.notify();
-                });
-            }
-        }
+        cx.spawn(async move |this, cx| {
+            let Some(src_zip) = rfd::FileDialog::new()
+                .add_filter("SegoeUI Mod Package", &["zip"])
+                .pick_file()
+            else {
+                return;
+            };
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    import_and_apply_package(&src_zip).map(|count| (count, src_zip))
+                })
+                .await;
+            let _ = this.update(cx, |view, cx| match result {
+                Ok((count, src_zip)) => {
+                    view.state.update(cx, |s, cx| {
+                        s.system_state = check_system_state();
+                        s.last_error = None;
+                        s.last_notice = Some(format!(
+                            "Imported & applied {count} fonts from {}. REBOOT REQUIRED to apply system-wide.",
+                            src_zip.display()
+                        ));
+                        cx.notify();
+                    });
+                }
+                Err(e) => {
+                    view.state.update(cx, |s, cx| {
+                        s.last_error = Some(format!("Import failed: {e}"));
+                        cx.notify();
+                    });
+                }
+            });
+        })
+        .detach();
     }
 
     fn install_fontforge(&self, cx: &mut Context<Self>) {
@@ -721,18 +740,25 @@ impl Render for SettingsView {
                             .child(
                                 VantageButton::new("ff-browse", "Browse ffpython.exe...", theme)
                                     .icon("icons/folder-open.svg")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        if let Some(path) = rfd::FileDialog::new()
-                                            .add_filter("FontForge Python", &["exe"])
-                                            .pick_file()
-                                        {
-                                            this.state.update(cx, |s, cx| {
-                                                s.config.custom_fontforge_path = Some(path.clone());
-                                                s.fontforge_path = Some(path);
-                                                let _ = s.save_config();
-                                                cx.notify();
+                                    .on_click(cx.listener(|_, _, _, cx| {
+                                        cx.spawn(async move |this, cx| {
+                                            let Some(path) = rfd::FileDialog::new()
+                                                .add_filter("FontForge Python", &["exe"])
+                                                .pick_file()
+                                            else {
+                                                return;
+                                            };
+                                            let _ = this.update(cx, |view, cx| {
+                                                view.state.update(cx, |s, cx| {
+                                                    s.config.custom_fontforge_path =
+                                                        Some(path.clone());
+                                                    s.fontforge_path = Some(path);
+                                                    let _ = s.save_config();
+                                                    cx.notify();
+                                                });
                                             });
-                                        }
+                                        })
+                                        .detach();
                                     })),
                             )
                             .child(

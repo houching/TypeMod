@@ -62,69 +62,80 @@ fn to_wide_null(s: &str) -> Vec<u16> {
 
 pub fn list_installed_fonts() -> Vec<(String, PathBuf)> {
     let mut result = Vec::new();
-    let mut hkey = HKEY::default();
-    let status = unsafe { RegOpenKeyExW(HKEY_LOCAL_MACHINE, FONTS_REG_PATH, Some(0), KEY_READ, &mut hkey) };
-    if status.is_err() {
-        return result;
-    }
-
+    let mut seen = std::collections::HashSet::new();
     let fonts_dir = windows_fonts_dir();
-    let mut idx = 0u32;
-    let mut name_buf = vec![0u16; 512];
-    let mut data_buf = vec![0u8; 1024];
 
-    loop {
-        let mut name_len = name_buf.len() as u32;
-        let mut data_len = data_buf.len() as u32;
-        let mut val_type = 0u32;
-
-        let err = unsafe {
-            RegEnumValueW(
-                hkey,
-                idx,
-                Some(PWSTR(name_buf.as_mut_ptr())),
-                &mut name_len,
-                None,
-                Some(&mut val_type),
-                Some(data_buf.as_mut_ptr()),
-                Some(&mut data_len),
-            )
-        };
-
-        if err == ERROR_NO_MORE_ITEMS {
-            break;
-        }
-        idx += 1;
-
-        if err.is_err() || val_type != REG_SZ.0 {
+    for root in [HKEY_LOCAL_MACHINE, windows::Win32::System::Registry::HKEY_CURRENT_USER] {
+        let mut hkey = HKEY::default();
+        let status = unsafe { RegOpenKeyExW(root, FONTS_REG_PATH, Some(0), KEY_READ, &mut hkey) };
+        if status.is_err() {
             continue;
         }
 
-        let raw_name = String::from_utf16_lossy(&name_buf[..name_len as usize]);
-        let u16_slice = unsafe {
-            std::slice::from_raw_parts(
-                data_buf.as_ptr() as *const u16,
-                (data_len as usize) / 2,
-            )
-        };
-        let raw_val = String::from_utf16_lossy(u16_slice)
-            .trim_end_matches('\0')
-            .to_string();
+        let mut idx = 0u32;
+        let mut name_buf = vec![0u16; 512];
+        let mut data_buf = vec![0u8; 1024];
 
-        let path = if Path::new(&raw_val).is_absolute() {
-            PathBuf::from(&raw_val)
-        } else {
-            fonts_dir.join(&raw_val)
-        };
+        loop {
+            let mut name_len = name_buf.len() as u32;
+            let mut data_len = data_buf.len() as u32;
+            let mut val_type = 0u32;
 
-        if path.exists() {
-            let clean_name = clean_registry_font_name(&raw_name);
-            result.push((clean_name, path));
+            let err = unsafe {
+                RegEnumValueW(
+                    hkey,
+                    idx,
+                    Some(PWSTR(name_buf.as_mut_ptr())),
+                    &mut name_len,
+                    None,
+                    Some(&mut val_type),
+                    Some(data_buf.as_mut_ptr()),
+                    Some(&mut data_len),
+                )
+            };
+
+            if err == ERROR_NO_MORE_ITEMS {
+                break;
+            }
+            idx += 1;
+
+            if err.is_err() || val_type != REG_SZ.0 {
+                continue;
+            }
+
+            let raw_name = String::from_utf16_lossy(&name_buf[..name_len as usize]);
+            let u16_slice = unsafe {
+                std::slice::from_raw_parts(
+                    data_buf.as_ptr() as *const u16,
+                    (data_len as usize) / 2,
+                )
+            };
+            let raw_val = String::from_utf16_lossy(u16_slice)
+                .trim_end_matches('\0')
+                .to_string();
+
+            let path = if Path::new(&raw_val).is_absolute() {
+                PathBuf::from(&raw_val)
+            } else {
+                fonts_dir.join(&raw_val)
+            };
+
+            let is_outline = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "ttf" | "otf" | "ttc"));
+
+            if is_outline && path.exists() {
+                let clean_name = clean_registry_font_name(&raw_name);
+                if seen.insert((clean_name.to_lowercase(), path.clone())) {
+                    result.push((clean_name, path));
+                }
+            }
         }
-    }
 
-    unsafe {
-        let _ = RegCloseKey(hkey);
+        unsafe {
+            let _ = RegCloseKey(hkey);
+        }
     }
 
     result.sort_by_key(|a| a.0.to_lowercase());

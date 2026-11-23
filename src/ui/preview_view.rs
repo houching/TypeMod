@@ -26,6 +26,8 @@ pub struct PreviewView {
     sample_text: String,
     font_size_px: f32,
     focus_handle: FocusHandle,
+    cursor_visible: bool,
+    _blink_task: Option<gpui::Task<()>>,
     loaded_paths: HashSet<PathBuf>,
     selected_family: Option<SharedString>,
     load_error: Option<String>,
@@ -39,10 +41,41 @@ impl PreviewView {
             sample_text: "សួស្តីកម្ពុជា — ភាសាខ្មែរ និង English UI 0123456789".to_string(),
             font_size_px: 18.0,
             focus_handle: cx.focus_handle(),
+            cursor_visible: true,
+            _blink_task: None,
             loaded_paths: HashSet::new(),
             selected_family: None,
             load_error: None,
         }
+    }
+
+    fn start_blink(&mut self, cx: &mut Context<Self>) {
+        self.cursor_visible = true;
+        if self._blink_task.is_some() {
+            return;
+        }
+        self._blink_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(530))
+                    .await;
+                let keep_going = this
+                    .update(cx, |view, cx| {
+                        if view.state.read(cx).active_tab != crate::app_state::NavTab::Preview {
+                            view.cursor_visible = true;
+                            view._blink_task = None;
+                            return false;
+                        }
+                        view.cursor_visible = !view.cursor_visible;
+                        cx.notify();
+                        true
+                    })
+                    .unwrap_or(false);
+                if !keep_going {
+                    break;
+                }
+            }
+        }));
     }
 
     fn ensure_selected_fonts_loaded(&mut self, cx: &mut Context<Self>) {
@@ -107,6 +140,7 @@ impl PreviewView {
                     && !event.keystroke.modifiers.control
                     && !event.keystroke.modifiers.alt
                 {
+                    self.cursor_visible = true;
                     self.sample_text.push_str(ch);
                     cx.notify();
                 }
@@ -230,6 +264,7 @@ impl Render for PreviewView {
                     .child(
                         div()
                             .flex()
+                            .flex_wrap()
                             .gap(px(6.0))
                             .child(
                                 VantageButton::new("prev-src-sel", "Selected Font", theme)
@@ -272,8 +307,10 @@ impl Render for PreviewView {
                     .child(
                         div()
                             .flex()
+                            .flex_wrap()
                             .items_center()
                             .justify_between()
+                            .gap(px(8.0))
                             .child(
                                 div()
                                     .text_xs()
@@ -284,6 +321,7 @@ impl Render for PreviewView {
                             .child(
                                 div()
                                     .flex()
+                                    .flex_wrap()
                                     .gap(px(6.0))
                                     .children(presets.into_iter().map(|(label, text)| {
                                         VantageButton::new(
@@ -317,6 +355,7 @@ impl Render for PreviewView {
                                 MouseButton::Left,
                                 cx.listener(|this, _, window, cx| {
                                     window.focus(&this.focus_handle);
+                                    this.start_blink(cx);
                                     cx.notify();
                                 }),
                             )
@@ -331,7 +370,7 @@ impl Render for PreviewView {
                                         theme.text
                                     })
                                     .child(sample.clone())
-                                    .when(is_focused, |d| {
+                                    .when(is_focused && self.cursor_visible, |d| {
                                         d.child(
                                             div()
                                                 .w(px(1.5))
@@ -345,11 +384,14 @@ impl Render for PreviewView {
                     .child(
                         div()
                             .flex()
+                            .flex_wrap()
                             .items_center()
                             .justify_between()
+                            .gap(px(8.0))
                             .child(
                                 div()
                                     .flex()
+                                    .flex_wrap()
                                     .items_center()
                                     .gap(px(8.0))
                                     .child(
@@ -373,6 +415,7 @@ impl Render for PreviewView {
                             .child(
                                 div()
                                     .flex()
+                                    .flex_wrap()
                                     .items_center()
                                     .gap(px(6.0))
                                     .child(

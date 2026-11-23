@@ -8,11 +8,15 @@ use crate::ui::components::{ButtonVariant, VantageButton};
 
 pub struct LogDrawer {
     state: Entity<AppState>,
+    copied: bool,
 }
 
 impl LogDrawer {
     pub fn new(state: Entity<AppState>) -> Self {
-        Self { state }
+        Self {
+            state,
+            copied: false,
+        }
     }
 }
 
@@ -51,6 +55,32 @@ impl Render for LogDrawer {
                         div()
                             .flex()
                             .gap(px(6.0))
+                            .child(
+                                VantageButton::new(
+                                    "copy-log",
+                                    if self.copied { "Copied!" } else { "Copy" },
+                                    theme,
+                                )
+                                .icon("icons/copy.svg")
+                                .variant(ButtonVariant::Ghost)
+                                .disabled(s.build_log.is_empty())
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    let text = this.state.read(cx).build_log.join("\n");
+                                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                                    this.copied = true;
+                                    cx.notify();
+                                    cx.spawn(async move |view, cx| {
+                                        cx.background_executor()
+                                            .timer(std::time::Duration::from_millis(1500))
+                                            .await;
+                                        let _ = view.update(cx, |drawer, cx| {
+                                            drawer.copied = false;
+                                            cx.notify();
+                                        });
+                                    })
+                                    .detach();
+                                })),
+                            )
                             .child(
                                 VantageButton::new("clear-log", "Clear", theme)
                                     .variant(ButtonVariant::Ghost)

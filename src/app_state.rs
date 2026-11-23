@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -16,7 +17,7 @@ pub enum NavTab {
     Settings,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SecondaryScript {
     #[default]
     Khmer,
@@ -135,10 +136,16 @@ pub struct PersistedConfig {
     #[serde(default)]
     pub secondary_script: SecondaryScript,
     #[serde(default)]
+    pub secondary_scripts: Vec<SecondaryScript>,
+    #[serde(default)]
     pub custom_fontforge_path: Option<PathBuf>,
     pub khmer: FontFamilySelection,
     pub latin_italic: FontFamilySelection,
     pub khmer_italic: FontFamilySelection,
+    #[serde(default)]
+    pub extra_script_fonts: HashMap<SecondaryScript, FontFamilySelection>,
+    #[serde(default)]
+    pub extra_script_italic_fonts: HashMap<SecondaryScript, FontFamilySelection>,
 }
 
 impl Default for PersistedConfig {
@@ -155,10 +162,90 @@ impl Default for PersistedConfig {
             rail_pinned: true,
             latin: FontFamilySelection::default(),
             secondary_script: SecondaryScript::Khmer,
+            secondary_scripts: vec![SecondaryScript::Khmer],
             custom_fontforge_path: None,
             khmer: FontFamilySelection::default(),
             latin_italic: FontFamilySelection::default(),
             khmer_italic: FontFamilySelection::default(),
+            extra_script_fonts: HashMap::new(),
+            extra_script_italic_fonts: HashMap::new(),
+        }
+    }
+}
+
+impl PersistedConfig {
+    pub fn active_scripts(&self) -> Vec<SecondaryScript> {
+        if self.secondary_scripts.is_empty() {
+            vec![self.secondary_script]
+        } else {
+            self.secondary_scripts.clone()
+        }
+    }
+
+    pub fn active_script_ranges(&self) -> Vec<(u32, u32)> {
+        let mut ranges = Vec::new();
+        for script in self.active_scripts() {
+            ranges.extend_from_slice(script.ranges());
+        }
+        ranges
+    }
+
+    pub fn active_scripts_summary(&self) -> String {
+        let active = self.active_scripts();
+        match active.len() {
+            0 => SecondaryScript::Khmer.label().to_string(),
+            1 => active[0].label().to_string(),
+            2 => format!("{}, {}", active[0].label(), active[1].label()),
+            n => format!("{}, {} +{}", active[0].label(), active[1].label(), n - 2),
+        }
+    }
+
+    pub fn toggle_secondary_script(&mut self, script: SecondaryScript) {
+        let mut list = self.active_scripts();
+        if let Some(pos) = list.iter().position(|&s| s == script) {
+            if list.len() > 1 {
+                list.remove(pos);
+            }
+        } else {
+            list.push(script);
+        }
+        self.secondary_script = list[0];
+        self.secondary_scripts = list;
+    }
+
+    pub fn script_font(&self, script: SecondaryScript) -> Option<&FontFamilySelection> {
+        let primary = self.active_scripts().into_iter().next().unwrap_or(SecondaryScript::Khmer);
+        if script == primary {
+            Some(&self.khmer)
+        } else {
+            self.extra_script_fonts.get(&script)
+        }
+    }
+
+    pub fn script_font_mut(&mut self, script: SecondaryScript) -> &mut FontFamilySelection {
+        let primary = self.active_scripts().into_iter().next().unwrap_or(SecondaryScript::Khmer);
+        if script == primary {
+            &mut self.khmer
+        } else {
+            self.extra_script_fonts.entry(script).or_default()
+        }
+    }
+
+    pub fn script_italic_font(&self, script: SecondaryScript) -> Option<&FontFamilySelection> {
+        let primary = self.active_scripts().into_iter().next().unwrap_or(SecondaryScript::Khmer);
+        if script == primary {
+            Some(&self.khmer_italic)
+        } else {
+            self.extra_script_italic_fonts.get(&script)
+        }
+    }
+
+    pub fn script_italic_font_mut(&mut self, script: SecondaryScript) -> &mut FontFamilySelection {
+        let primary = self.active_scripts().into_iter().next().unwrap_or(SecondaryScript::Khmer);
+        if script == primary {
+            &mut self.khmer_italic
+        } else {
+            self.extra_script_italic_fonts.entry(script).or_default()
         }
     }
 }

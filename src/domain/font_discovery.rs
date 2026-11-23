@@ -1,18 +1,30 @@
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-
-use read_fonts::{FontRef, TableProvider};
 
 use crate::app_state::FontFamilySelection;
 
 pub fn is_variable_font(path: &Path) -> bool {
-    let Ok(bytes) = fs::read(path) else {
+    let Ok(mut file) = fs::File::open(path) else {
         return false;
     };
-    let Ok(font) = FontRef::new(&bytes) else {
+    let mut header = [0u8; 12];
+    if file.read_exact(&mut header).is_err() {
         return false;
-    };
-    font.fvar().is_ok()
+    }
+    let sfnt = &header[..4];
+    if sfnt != [0x00, 0x01, 0x00, 0x00] && sfnt != b"OTTO" && sfnt != b"true" {
+        return false;
+    }
+    let num_tables = u16::from_be_bytes([header[4], header[5]]) as usize;
+    if num_tables == 0 || num_tables > 512 {
+        return false;
+    }
+    let mut directory = vec![0u8; num_tables * 16];
+    if file.read_exact(&mut directory).is_err() {
+        return false;
+    }
+    directory.chunks_exact(16).any(|rec| &rec[..4] == b"fvar")
 }
 
 pub fn auto_detect_weights(
@@ -172,5 +184,17 @@ mod tests {
         assert_eq!(sel.semilight.unwrap(), Path::new("Inter-SemiLight.ttf"));
         assert_eq!(sel.light.unwrap(), Path::new("Inter-Light.ttf"));
         assert_eq!(sel.black.unwrap(), Path::new("Inter-Black.ttf"));
+    }
+
+    #[test]
+    fn detects_variable_vs_static_fonts() {
+        let static_segoe = Path::new(r"C:\Windows\Fonts\segoeui.ttf");
+        assert!(static_segoe.exists(), "expected Windows segoeui.ttf");
+        assert!(!is_variable_font(static_segoe));
+
+        let var_segoe = Path::new(r"C:\Windows\Fonts\SegUIVar.ttf");
+        if var_segoe.exists() {
+            assert!(is_variable_font(var_segoe));
+        }
     }
 }

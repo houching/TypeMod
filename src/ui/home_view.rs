@@ -63,44 +63,60 @@ impl HomeView {
     }
 
     fn browse_regular(&self, slot: FontTargetSlot, cx: &mut Context<Self>) {
-        let Some(path) = FileDialog::new()
-            .add_filter("Font Files", &["ttf", "otf"])
-            .pick_file()
-        else {
-            return;
-        };
+        cx.spawn(async move |this, cx| {
+            let Some(path) = FileDialog::new()
+                .add_filter("Font Files", &["ttf", "otf"])
+                .pick_file()
+            else {
+                return;
+            };
 
-        let installed = list_installed_fonts();
-        let detected = auto_detect_weights(&path, None, &installed);
-        self.state.update(cx, |s, cx| {
-            let target = slot_mut(&mut s.config, slot);
-            *target = detected;
-            s.last_error = None;
-            let _ = s.save_config();
-            cx.notify();
-        });
+            let detected = cx
+                .background_executor()
+                .spawn(async move {
+                    let installed = list_installed_fonts();
+                    auto_detect_weights(&path, None, &installed)
+                })
+                .await;
+
+            let _ = this.update(cx, |view, cx| {
+                view.state.update(cx, |s, cx| {
+                    let target = slot_mut(&mut s.config, slot);
+                    *target = detected;
+                    s.last_error = None;
+                    let _ = s.save_config();
+                    cx.notify();
+                });
+            });
+        })
+        .detach();
     }
 
     fn browse_weight(&self, slot: FontTargetSlot, weight: WeightKind, cx: &mut Context<Self>) {
-        let Some(path) = FileDialog::new()
-            .add_filter("Font Files", &["ttf", "otf"])
-            .pick_file()
-        else {
-            return;
-        };
+        cx.spawn(async move |this, cx| {
+            let Some(path) = FileDialog::new()
+                .add_filter("Font Files", &["ttf", "otf"])
+                .pick_file()
+            else {
+                return;
+            };
 
-        self.state.update(cx, |s, cx| {
-            let target = slot_mut(&mut s.config, slot);
-            match weight {
-                WeightKind::Light => target.light = Some(path),
-                WeightKind::Semilight => target.semilight = Some(path),
-                WeightKind::Semibold => target.semibold = Some(path),
-                WeightKind::Bold => target.bold = Some(path),
-                WeightKind::Black => target.black = Some(path),
-            }
-            let _ = s.save_config();
-            cx.notify();
-        });
+            let _ = this.update(cx, |view, cx| {
+                view.state.update(cx, |s, cx| {
+                    let target = slot_mut(&mut s.config, slot);
+                    match weight {
+                        WeightKind::Light => target.light = Some(path),
+                        WeightKind::Semilight => target.semilight = Some(path),
+                        WeightKind::Semibold => target.semibold = Some(path),
+                        WeightKind::Bold => target.bold = Some(path),
+                        WeightKind::Black => target.black = Some(path),
+                    }
+                    let _ = s.save_config();
+                    cx.notify();
+                });
+            });
+        })
+        .detach();
     }
 
     fn clear_slot(&self, slot: FontTargetSlot, cx: &mut Context<Self>) {
@@ -133,27 +149,33 @@ impl HomeView {
         }
 
         if !s.is_admin {
-            let confirmed = MessageDialog::new()
-                .set_level(MessageLevel::Info)
-                .set_title("Administrator Privileges Required")
-                .set_description(
-                    "Modifying Windows system fonts requires Administrator privileges. Relaunch elevated now?",
-                )
-                .set_buttons(MessageButtons::YesNo)
-                .show()
-                == MessageDialogResult::Yes;
-            if confirmed && let Ok(state_path) = s.save_temp_state() {
-                match relaunch_elevated(&state_path) {
-                    Ok(true) => std::process::exit(0),
-                    Ok(false) => {}
-                    Err(e) => {
-                        self.state.update(cx, |s, cx| {
-                            s.last_error = Some(format!("Elevation failed: {e}"));
-                            cx.notify();
-                        });
+            let state_path_res = s.save_temp_state();
+            cx.spawn(async move |this, cx| {
+                let confirmed = MessageDialog::new()
+                    .set_level(MessageLevel::Info)
+                    .set_title("Administrator Privileges Required")
+                    .set_description(
+                        "Modifying Windows system fonts requires Administrator privileges. Relaunch elevated now?",
+                    )
+                    .set_buttons(MessageButtons::YesNo)
+                    .show()
+                    == MessageDialogResult::Yes;
+                if confirmed && let Ok(state_path) = state_path_res {
+                    match relaunch_elevated(&state_path) {
+                        Ok(true) => std::process::exit(0),
+                        Ok(false) => {}
+                        Err(e) => {
+                            let _ = this.update(cx, |view, cx| {
+                                view.state.update(cx, |s, cx| {
+                                    s.last_error = Some(format!("Elevation failed: {e}"));
+                                    cx.notify();
+                                });
+                            });
+                        }
                     }
                 }
-            }
+            })
+            .detach();
             return;
         }
 
@@ -249,7 +271,7 @@ impl HomeView {
                 match res {
                     Ok(()) => {
                         s.progress = 1.0;
-                        s.status_text = "Ready".to_string();
+                        s.status_text = "Success! Reboot required to apply changes.".to_string();
                         s.last_notice = Some(
                             "Success! REBOOT REQUIRED to apply system-wide font changes."
                                 .to_string(),
@@ -284,77 +306,85 @@ impl HomeView {
     fn restore_system(&self, cx: &mut Context<Self>) {
         let s = self.state.read(cx);
         if !s.is_admin {
-            let confirmed = MessageDialog::new()
-                .set_level(MessageLevel::Info)
-                .set_title("Administrator Privileges Required")
+            let state_path_res = s.save_temp_state();
+            cx.spawn(async move |_, _cx| {
+                let confirmed = MessageDialog::new()
+                    .set_level(MessageLevel::Info)
+                    .set_title("Administrator Privileges Required")
+                    .set_description(
+                        "Restoring Windows system fonts requires Administrator privileges. Relaunch elevated now?",
+                    )
+                    .set_buttons(MessageButtons::YesNo)
+                    .show()
+                    == MessageDialogResult::Yes;
+                if confirmed
+                    && let Ok(state_path) = state_path_res
+                    && let Ok(true) = relaunch_elevated(&state_path)
+                {
+                    std::process::exit(0);
+                }
+            })
+            .detach();
+            return;
+        }
+
+        let has_clones = s.clones_installed;
+        cx.spawn(async move |this, cx| {
+            let confirm_restore = MessageDialog::new()
+                .set_level(MessageLevel::Warning)
+                .set_title("Restore Original Font")
                 .set_description(
-                    "Restoring Windows system fonts requires Administrator privileges. Relaunch elevated now?",
+                    "This will reset all Segoe UI Registry entries back to stock Windows defaults. Proceed?",
                 )
                 .set_buttons(MessageButtons::YesNo)
                 .show()
                 == MessageDialogResult::Yes;
-            if confirmed
-                && let Ok(state_path) = s.save_temp_state()
-                && let Ok(true) = relaunch_elevated(&state_path)
-            {
-                std::process::exit(0);
+            if !confirm_restore {
+                return;
             }
-            return;
-        }
-
-        let confirm_restore = MessageDialog::new()
-            .set_level(MessageLevel::Warning)
-            .set_title("Restore Original Font")
-            .set_description(
-                "This will reset all Segoe UI Registry entries back to stock Windows defaults. Proceed?",
-            )
-            .set_buttons(MessageButtons::YesNo)
-            .show()
-            == MessageDialogResult::Yes;
-        if !confirm_restore {
-            return;
-        }
-
-        let delete_clones = if s.clones_installed {
-            MessageDialog::new()
-                .set_level(MessageLevel::Info)
-                .set_title("Remove Segoe UI Clone?")
-                .set_description(
-                    "Segoe UI Clone fonts are installed. Do you want to remove them as well?",
-                )
-                .set_buttons(MessageButtons::YesNo)
-                .show()
-                == MessageDialogResult::Yes
-        } else {
-            false
-        };
-        match restore_original_fonts(delete_clones) {
-            Ok(()) => {
-                self.state.update(cx, |s, cx| {
-                    s.system_state = check_system_state();
-                    s.clones_installed = are_clones_installed();
-                    s.last_error = None;
-                    s.last_notice = Some(
-                        "Restored stock Segoe UI registry entries. REBOOT REQUIRED to finalize."
-                            .to_string(),
-                    );
-                    cx.notify();
-                });
-            }
-            Err(e) => {
-                self.state.update(cx, |s, cx| {
-                    s.last_error = Some(format!("Restore failed: {e}"));
-                    cx.notify();
-                });
-            }
-        }
+            let delete_clones = if has_clones {
+                MessageDialog::new()
+                    .set_level(MessageLevel::Info)
+                    .set_title("Remove Segoe UI Clone?")
+                    .set_description(
+                        "Segoe UI Clone fonts are installed. Do you want to remove them as well?",
+                    )
+                    .set_buttons(MessageButtons::YesNo)
+                    .show()
+                    == MessageDialogResult::Yes
+            } else {
+                false
+            };
+            let res = restore_original_fonts(delete_clones);
+            let _ = this.update(cx, |view, cx| match res {
+                Ok(()) => {
+                    view.state.update(cx, |s, cx| {
+                        s.system_state = check_system_state();
+                        s.clones_installed = are_clones_installed();
+                        s.last_error = None;
+                        s.last_notice = Some(
+                            "Restored stock Segoe UI registry entries. REBOOT REQUIRED to finalize."
+                                .to_string(),
+                        );
+                        cx.notify();
+                    });
+                }
+                Err(e) => {
+                    view.state.update(cx, |s, cx| {
+                        s.last_error = Some(format!("Restore failed: {e}"));
+                        cx.notify();
+                    });
+                }
+            });
+        })
+        .detach();
     }
 
     fn render_font_card(
         &self,
         props: FontCardProps<'_>,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> impl IntoElement + use<> {
         let FontCardProps {
             title,
             subtitle,
@@ -391,12 +421,10 @@ impl HomeView {
         .into_iter()
         .filter(|&x| x)
         .count();
-        let weight_summary = if sel.is_variable {
-            "Variable (6 weights on build)".to_string()
-        } else if sel.has_regular() {
-            format!("{detected_count}/6 weights")
-        } else {
+        let weight_summary = if sel.is_variable || !sel.has_regular() {
             String::new()
+        } else {
+            format!("{detected_count}/6 weights")
         };
 
         div()
@@ -570,9 +598,9 @@ impl HomeView {
 fn slot_mut(cfg: &mut crate::app_state::PersistedConfig, slot: FontTargetSlot) -> &mut FontFamilySelection {
     match slot {
         FontTargetSlot::Latin => &mut cfg.latin,
-        FontTargetSlot::Khmer => &mut cfg.khmer,
+        FontTargetSlot::Script(script) => cfg.script_font_mut(script),
         FontTargetSlot::LatinItalic => &mut cfg.latin_italic,
-        FontTargetSlot::KhmerItalic => &mut cfg.khmer_italic,
+        FontTargetSlot::ScriptItalic(script) => cfg.script_italic_font_mut(script),
     }
 }
 
@@ -585,8 +613,8 @@ impl Render for HomeView {
         let progress = s.progress.clamp(0.0, 1.0);
         let status_text = s.status_text.clone();
 
-        let same_as_latin = cfg.khmer.has_regular() && cfg.khmer.regular == cfg.latin.regular;
-        let script_name = cfg.secondary_script.label();
+        let active_scripts = cfg.active_scripts();
+        let script_name = cfg.active_scripts_summary();
         let ff_ready = s.fontforge_path.is_some();
         let can_build = !is_busy && cfg.latin.has_regular();
         let pct_label = format!("{}%", (progress * 100.0).round() as u32);
@@ -638,26 +666,26 @@ impl Render for HomeView {
                                     .flex_col()
                                     .gap(px(2.0))
                                     .children(SecondaryScript::ALL.into_iter().map(|script| {
-                                        let active = cfg.secondary_script == script;
-                                        let label = if script == SecondaryScript::Khmer {
-                                            "Khmer (Default)"
+                                        let active = active_scripts.contains(&script);
+                                        let label = if active {
+                                            format!("✓  {}", script.label())
                                         } else {
-                                            script.label()
+                                            format!("    {}", script.label())
                                         };
                                         VantageButton::new(
                                             SharedString::from(format!("script-{}", script.label())),
                                             label,
                                             theme,
                                         )
+                                        .align_left(true)
                                         .variant(if active {
                                             ButtonVariant::Primary
                                         } else {
                                             ButtonVariant::Ghost
                                         })
                                         .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.script_dropdown_open = false;
                                             this.state.update(cx, |s, cx| {
-                                                s.config.secondary_script = script;
+                                                s.config.toggle_secondary_script(script);
                                                 let _ = s.save_config();
                                                 cx.notify();
                                             });
@@ -669,6 +697,71 @@ impl Render for HomeView {
                     }),
             )
             .into_any_element();
+
+        let mut script_selector_opt = Some(script_selector_row);
+        let mut base_script_cards = Vec::with_capacity(active_scripts.len());
+        for (idx, &script) in active_scripts.iter().enumerate() {
+            let s_name = script.label();
+            let script_sel = cfg.script_font(script).cloned().unwrap_or_default();
+            let script_same_as_latin =
+                script_sel.has_regular() && script_sel.regular == cfg.latin.regular;
+            let title = if idx == 0 {
+                format!("2. {s_name} Base Font (Optional)")
+            } else {
+                format!("2.{} {s_name} Base Font (Optional)", idx + 1)
+            };
+            base_script_cards.push(self.render_font_card(
+                FontCardProps {
+                    title: title.into(),
+                    subtitle: format!(
+                        "Optional {s_name} font merged with OpenType shaping (GSUB/GPOS)."
+                    )
+                    .into(),
+                    slot: FontTargetSlot::Script(script),
+                    sel: &script_sel,
+                    is_busy,
+                    extra_header_row: if idx == 0 {
+                        script_selector_opt.take()
+                    } else {
+                        None
+                    },
+                    extra_note: script_same_as_latin.then(|| {
+                        SharedString::from(format!(
+                            "Same file as Latin — {s_name} glyphs & shaping will be preserved automatically in single-font mode."
+                        ))
+                    }),
+                },
+                cx,
+            ));
+        }
+
+        let mut italic_script_cards = Vec::new();
+        if cfg.enable_italic {
+            for (idx, &script) in active_scripts.iter().enumerate() {
+                let s_name = script.label();
+                let script_ital_sel = cfg.script_italic_font(script).cloned().unwrap_or_default();
+                let title = if idx == 0 {
+                    format!("4. {s_name} Italic / Oblique Font (Optional)")
+                } else {
+                    format!("4.{} {s_name} Italic / Oblique Font (Optional)", idx + 1)
+                };
+                italic_script_cards.push(self.render_font_card(
+                    FontCardProps {
+                        title: title.into(),
+                        subtitle: format!(
+                            "Optional {s_name} italic weights merged into Segoe UI Italic."
+                        )
+                        .into(),
+                        slot: FontTargetSlot::ScriptItalic(script),
+                        sel: &script_ital_sel,
+                        is_busy,
+                        extra_header_row: None,
+                        extra_note: None,
+                    },
+                    cx,
+                ));
+            }
+        }
 
         div()
             .id("home-scroll")
@@ -691,25 +784,7 @@ impl Render for HomeView {
                 },
                 cx,
             ))
-            .child(self.render_font_card(
-                FontCardProps {
-                    title: format!("2. {script_name} Base Font (Optional)").into(),
-                    subtitle: format!(
-                        "Optional {script_name} font merged with OpenType shaping (GSUB/GPOS)."
-                    )
-                    .into(),
-                    slot: FontTargetSlot::Khmer,
-                    sel: &cfg.khmer,
-                    is_busy,
-                    extra_header_row: Some(script_selector_row),
-                    extra_note: same_as_latin.then(|| {
-                        SharedString::from(format!(
-                            "Same file as Latin — {script_name} glyphs & shaping will be preserved automatically in single-font mode."
-                        ))
-                    }),
-                },
-                cx,
-            ))
+            .children(base_script_cards)
             .when(cfg.enable_italic, |d| {
                 d.child(self.render_font_card(
                     FontCardProps {
@@ -725,22 +800,7 @@ impl Render for HomeView {
                     },
                     cx,
                 ))
-                .child(self.render_font_card(
-                    FontCardProps {
-                        title: format!("4. {script_name} Italic / Oblique Font (Optional)")
-                            .into(),
-                        subtitle: format!(
-                            "Optional {script_name} italic weights merged into Segoe UI Italic."
-                        )
-                        .into(),
-                        slot: FontTargetSlot::KhmerItalic,
-                        sel: &cfg.khmer_italic,
-                        is_busy,
-                        extra_header_row: None,
-                        extra_note: None,
-                    },
-                    cx,
-                ))
+                .children(italic_script_cards)
             })
             // Action & Progress Panel
             .child(

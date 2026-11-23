@@ -176,9 +176,19 @@ impl RenderOnce for VantageButton {
             .when(!self.align_left || self.icon_only, |d| d.justify_center())
             .gap(px(8.0))
             .when_some(self.icon, |d, icon_path| {
-                d.child(svg().path(icon_path).size(px(15.0)).text_color(fg).flex_shrink_0())
+                d.child(
+                    div()
+                        .size(px(15.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .flex_shrink_0()
+                        .child(svg().path(icon_path).size(px(15.0)).text_color(fg)),
+                )
             })
-            .when(!self.icon_only, |d| d.child(self.label));
+            .when(!self.icon_only, |d| {
+                d.child(div().line_height(px(15.0)).child(self.label))
+            });
 
         if self.disabled {
             el = el.opacity(0.45);

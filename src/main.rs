@@ -88,7 +88,7 @@ fn main() {
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 titlebar: Some(TitlebarOptions {
-                    title: Some("SegoeUI Changer".into()),
+                    title: Some(format!("SegoeUI Changer v{}", env!("CARGO_PKG_VERSION")).into()),
                     ..Default::default()
                 }),
                 ..Default::default()
