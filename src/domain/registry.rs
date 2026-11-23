@@ -359,9 +359,11 @@ pub fn live_refresh_font_cache() {
 
     // Remove modded fonts or re-add stock fonts in current GDI session
     let is_modded = check_system_state() == SystemFontState::Modded;
-    for (_, stock_file) in STOCK_SEGOE_ENTRIES {
-        let mod_name = stock_file.replace(".ttf", "_system_mod.ttf");
-        let mod_path = to_wide_null(&fonts_dir.join(&mod_name).to_string_lossy());
+    for (reg_key, stock_file) in STOCK_SEGOE_ENTRIES {
+        let active_mod = query_font_value(reg_key)
+            .filter(|v| v.to_ascii_lowercase().contains("system_mod"))
+            .unwrap_or_else(|| stock_file.replace(".ttf", "_system_mod.ttf"));
+        let mod_path = to_wide_null(&fonts_dir.join(&active_mod).to_string_lossy());
         let stock_path = to_wide_null(&fonts_dir.join(stock_file).to_string_lossy());
         unsafe {
             if is_modded {
@@ -380,6 +382,8 @@ Remove-Item "$env:WINDIR\ServiceProfiles\LocalService\AppData\Local\FontCache\*"
 Remove-Item "$env:WINDIR\System32\FNTCACHE.DAT" -Force -ErrorAction SilentlyContinue
 Start-Service -Name FontCache -ErrorAction SilentlyContinue
 Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
+Start-Sleep -Milliseconds 400
+if (-not (Get-Process -Name explorer -ErrorAction SilentlyContinue)) { Start-Process explorer.exe }
 "#;
     let _ = std::process::Command::new("powershell")
         .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", ps])

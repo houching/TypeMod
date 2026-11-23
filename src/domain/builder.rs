@@ -108,6 +108,7 @@ pub fn ensure_fonttools_python(
     let has_fonttools = |exe: &Path| -> bool {
         Command::new(exe)
             .args(["-c", "import fontTools"])
+            .creation_flags(CREATE_NO_WINDOW)
             .output()
             .is_ok_and(|o| o.status.success())
     };

@@ -94,13 +94,21 @@ const PACKAGE_FONT_MAP: &[(&str, &str)] = &[
     ("seguibli_system_mod.ttf", "Segoe UI Black Italic (TrueType)"),
 ];
 
+fn unique_temp_dir(prefix: &str) -> PathBuf {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    std::env::temp_dir().join(format!("{prefix}_{}_{}", std::process::id(), ts))
+}
+
 /// Packages all built `*_system_mod.ttf` files plus a `package.json` manifest into a shareable `.zip`.
 pub fn export_mod_package(
     dest_zip: &Path,
     latin_name: Option<&str>,
     khmer_name: Option<&str>,
 ) -> anyhow::Result<usize> {
-    let stage_dir = std::env::temp_dir().join("segoeui_pkg_stage");
+    let stage_dir = unique_temp_dir("segoeui_pkg_stage");
     if stage_dir.exists() {
         let _ = fs::remove_dir_all(&stage_dir);
     }
@@ -120,13 +128,16 @@ pub fn export_mod_package(
     if dest_zip.exists() {
         let _ = fs::remove_file(dest_zip);
     }
-    let ps = format!(
-        "Compress-Archive -Path '{}' -DestinationPath '{}' -Force",
-        stage_dir.join("*").display(),
-        dest_zip.display()
-    );
     let status = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &ps])
+        .args([
+            "-NoProfile",
+            "-WindowStyle",
+            "Hidden",
+            "-Command",
+            "Compress-Archive -LiteralPath (Get-ChildItem -LiteralPath $env:SEGOEUI_PS_SRC | Select-Object -ExpandProperty FullName) -DestinationPath $env:SEGOEUI_PS_DST -Force",
+        ])
+        .env("SEGOEUI_PS_SRC", &stage_dir)
+        .env("SEGOEUI_PS_DST", dest_zip)
         .creation_flags(CREATE_NO_WINDOW)
         .status()?;
 
@@ -139,19 +150,22 @@ pub fn export_mod_package(
 
 /// Extracts a `.zip` mod package, backs up stock Segoe UI, installs the fonts, and updates HKLM.
 pub fn import_and_apply_package(src_zip: &Path) -> anyhow::Result<usize> {
-    let import_dir = std::env::temp_dir().join("segoeui_pkg_import");
+    let import_dir = unique_temp_dir("segoeui_pkg_import");
     if import_dir.exists() {
         let _ = fs::remove_dir_all(&import_dir);
     }
     fs::create_dir_all(&import_dir)?;
 
-    let ps = format!(
-        "Expand-Archive -Path '{}' -DestinationPath '{}' -Force",
-        src_zip.display(),
-        import_dir.display()
-    );
     let status = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &ps])
+        .args([
+            "-NoProfile",
+            "-WindowStyle",
+            "Hidden",
+            "-Command",
+            "Expand-Archive -LiteralPath $env:SEGOEUI_PS_SRC -DestinationPath $env:SEGOEUI_PS_DST -Force",
+        ])
+        .env("SEGOEUI_PS_SRC", src_zip)
+        .env("SEGOEUI_PS_DST", &import_dir)
         .creation_flags(CREATE_NO_WINDOW)
         .status()?;
 
@@ -160,7 +174,8 @@ pub fn import_and_apply_package(src_zip: &Path) -> anyhow::Result<usize> {
         anyhow::bail!("Failed to extract package {}", src_zip.display());
     }
 
-    if !import_dir.join("segoeui_system_mod.ttf").exists() {
+    let marker = import_dir.join("segoeui_system_mod.ttf");
+    if !fs::symlink_metadata(&marker).is_ok_and(|m| m.file_type().is_file()) {
         let _ = fs::remove_dir_all(&import_dir);
         anyhow::bail!("Invalid package: segoeui_system_mod.ttf not found in archive.");
     }
@@ -175,7 +190,7 @@ pub fn import_and_apply_package(src_zip: &Path) -> anyhow::Result<usize> {
     let mut reg_updates: Vec<(&str, String)> = Vec::new();
     for (file_name, reg_key) in PACKAGE_FONT_MAP {
         let src = import_dir.join(file_name);
-        if src.exists() {
+        if fs::symlink_metadata(&src).is_ok_and(|m| m.file_type().is_file()) {
             let tagged = file_name.replace(".ttf", &format!("_{tag}.ttf"));
             fs::copy(&src, fonts_dir.join(&tagged))?;
             reg_updates.push((*reg_key, tagged));

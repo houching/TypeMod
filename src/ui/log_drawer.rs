@@ -42,8 +42,10 @@ impl Render for LogDrawer {
             .child(
                 div()
                     .flex()
+                    .flex_wrap()
                     .items_center()
                     .justify_between()
+                    .gap(px(8.0))
                     .child(
                         div()
                             .text_xs()
@@ -108,6 +110,7 @@ impl Render for LogDrawer {
                 div()
                     .id("log-scroll")
                     .flex_1()
+                    .min_h_0()
                     .overflow_y_scroll()
                     .bg(theme.bg)
                     .border_1()

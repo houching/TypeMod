@@ -11,7 +11,7 @@ use crate::domain::builder::{BuildProgressEvent, find_fontforge, run_build_and_a
 use crate::domain::elevation::relaunch_elevated;
 use crate::domain::font_discovery::auto_detect_weights;
 use crate::domain::registry::{
-    are_clones_installed, check_system_state, list_installed_fonts, restore_original_fonts,
+    are_clones_installed, check_system_state, restore_original_fonts,
 };
 use crate::ui::components::{BadgeTone, ButtonVariant, StatusPill, VantageButton};
 use crate::ui::font_picker_modal::{FontPickerModal, FontTargetSlot};
@@ -73,10 +73,7 @@ impl HomeView {
 
             let detected = cx
                 .background_executor()
-                .spawn(async move {
-                    let installed = list_installed_fonts();
-                    auto_detect_weights(&path, None, &installed)
-                })
+                .spawn(async move { auto_detect_weights(&path, None, &[]) })
                 .await;
 
             let _ = this.update(cx, |view, cx| {
@@ -473,6 +470,7 @@ impl HomeView {
                     .child(
                         div()
                             .flex()
+                            .flex_wrap()
                             .gap(px(6.0))
                             .child(
                                 VantageButton::new(
@@ -544,6 +542,7 @@ impl HomeView {
                     .gap(px(6.0))
                     .child(
                         div()
+                            .min_w_0()
                             .text_xs()
                             .text_color(if sel.has_regular() {
                                 theme.text
@@ -552,9 +551,15 @@ impl HomeView {
                             })
                             .child(file_label),
                     )
-                    .when_some(sel.display_name.clone(), |d, name| {
-                        d.child(StatusPill::new(name, BadgeTone::Neutral, theme))
-                    }),
+                    .when_some(
+                        sel.display_name.clone().filter(|name| {
+                            sel.regular
+                                .as_ref()
+                                .and_then(|p| p.file_stem())
+                                .is_none_or(|s| s.to_string_lossy() != *name)
+                        }),
+                        |d, name| d.child(StatusPill::new(name, BadgeTone::Neutral, theme)),
+                    ),
             )
             .when(!sel.is_variable, |d| {
                 d.child(
@@ -656,7 +661,7 @@ impl Render for HomeView {
                                     .absolute()
                                     .top(px(40.0))
                                     .right_0()
-                                    .w(px(170.0))
+                                    .w(gpui::rems(11.5))
                                     .bg(theme.surface)
                                     .border_1()
                                     .border_color(theme.line_2)
@@ -766,7 +771,17 @@ impl Render for HomeView {
         div()
             .id("home-scroll")
             .flex_1()
+            .min_h_0()
             .overflow_y_scroll()
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    if this.script_dropdown_open {
+                        this.script_dropdown_open = false;
+                        cx.notify();
+                    }
+                }),
+            )
             .p(px(20.0))
             .flex()
             .flex_col()
@@ -858,6 +873,7 @@ impl Render for HomeView {
                             .child(
                                 div()
                                     .flex()
+                                    .flex_wrap()
                                     .gap(px(8.0))
                                     .when(is_busy, |d| {
                                         d.child(

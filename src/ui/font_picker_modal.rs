@@ -150,14 +150,18 @@ impl Render for FontPickerModal {
         let theme = self.state.read(cx).theme();
         let is_focused = self.focus_handle.is_focused(window);
         let query_lc = self.query.to_ascii_lowercase();
-        let all_matches: Vec<(String, PathBuf)> = self
+        let total_matches = self
             .fonts
             .iter()
             .filter(|(name, _)| query_lc.is_empty() || name.to_ascii_lowercase().contains(&query_lc))
+            .count();
+        let filtered: Vec<(String, PathBuf)> = self
+            .fonts
+            .iter()
+            .filter(|(name, _)| query_lc.is_empty() || name.to_ascii_lowercase().contains(&query_lc))
+            .take(150)
             .cloned()
             .collect();
-        let total_matches = all_matches.len();
-        let filtered: Vec<(String, PathBuf)> = all_matches.into_iter().take(150).collect();
         let show_cursor = is_focused && self.cursor_visible;
 
         div()

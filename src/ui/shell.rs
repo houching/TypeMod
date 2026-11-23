@@ -282,39 +282,25 @@ impl Render for ShellView {
                     } else {
                         div()
                             .w_full()
-                            .p(px(10.0))
-                            .rounded(px(6.0))
-                            .bg(theme.surface_2)
-                            .border_1()
+                            .px(px(10.0))
+                            .py(px(8.0))
+                            .border_t_1()
                             .border_color(theme.line)
                             .flex()
-                            .flex_col()
-                            .gap(px(4.0))
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .justify_between()
-                                    .gap(px(6.0))
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                                            .text_color(theme.text)
-                                            .child("About App"),
-                                    )
-                                    .child(StatusPill::new(
-                                        format!("v{}", env!("CARGO_PKG_VERSION")),
-                                        BadgeTone::Accent,
-                                        theme,
-                                    )),
-                            )
+                            .items_center()
+                            .justify_between()
+                            .gap(px(6.0))
                             .child(
                                 div()
                                     .text_xs()
                                     .text_color(theme.text_3)
-                                    .child("SegoeUI Changer · Rust + GPUI + FontForge"),
+                                    .child("Version"),
                             )
+                            .child(StatusPill::new(
+                                format!("v{}", env!("CARGO_PKG_VERSION")),
+                                BadgeTone::Neutral,
+                                theme,
+                            ))
                             .into_any_element()
                     }),
             )
@@ -352,6 +338,7 @@ impl Render for ShellView {
                             .child(
                                 div()
                                     .flex()
+                                    .flex_wrap()
                                     .items_center()
                                     .gap(px(8.0))
                                     .child(StatusPill::new(

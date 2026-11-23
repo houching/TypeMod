@@ -29,6 +29,7 @@ pub struct PreviewView {
     cursor_visible: bool,
     _blink_task: Option<gpui::Task<()>>,
     loaded_paths: HashSet<PathBuf>,
+    last_candidates: Vec<PathBuf>,
     selected_family: Option<SharedString>,
     load_error: Option<String>,
 }
@@ -44,6 +45,7 @@ impl PreviewView {
             cursor_visible: true,
             _blink_task: None,
             loaded_paths: HashSet::new(),
+            last_candidates: Vec::new(),
             selected_family: None,
             load_error: None,
         }
@@ -80,7 +82,7 @@ impl PreviewView {
 
     fn ensure_selected_fonts_loaded(&mut self, cx: &mut Context<Self>) {
         let cfg = &self.state.read(cx).config;
-        let candidates: Vec<PathBuf> = [
+        let mut raw_candidates: Vec<PathBuf> = [
             &cfg.latin.regular,
             &cfg.latin.light,
             &cfg.latin.semilight,
@@ -91,8 +93,20 @@ impl PreviewView {
         ]
         .into_iter()
         .filter_map(|p| p.clone())
-        .filter(|p| p.exists())
         .collect();
+
+        for sel in cfg.extra_script_fonts.values() {
+            if let Some(p) = &sel.regular {
+                raw_candidates.push(p.clone());
+            }
+        }
+
+        if raw_candidates == self.last_candidates {
+            return;
+        }
+        self.last_candidates = raw_candidates.clone();
+
+        let candidates: Vec<PathBuf> = raw_candidates.into_iter().filter(|p| p.exists()).collect();
 
         if candidates.is_empty() {
             self.selected_family = None;
@@ -228,6 +242,7 @@ impl Render for PreviewView {
         div()
             .id("preview-scroll")
             .flex_1()
+            .min_h_0()
             .overflow_y_scroll()
             .p(px(20.0))
             .flex()
@@ -363,6 +378,9 @@ impl Render for PreviewView {
                                 div()
                                     .flex()
                                     .items_center()
+                                    .min_w_0()
+                                    .w_full()
+                                    .overflow_hidden()
                                     .text_sm()
                                     .text_color(if self.sample_text.is_empty() {
                                         theme.text_3

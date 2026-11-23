@@ -116,6 +116,7 @@ impl Render for ResizerView {
         div()
             .id("resizer-scroll")
             .flex_1()
+            .min_h_0()
             .overflow_y_scroll()
             .p(px(20.0))
             .flex()
@@ -178,12 +179,16 @@ impl Render for ResizerView {
                     .rounded(px(8.0))
                     .p(px(16.0))
                     .flex()
+                    .flex_wrap()
                     .items_center()
                     .justify_between()
+                    .gap(px(10.0))
                     .child(
                         div()
                             .flex()
                             .flex_col()
+                            .flex_1()
+                            .min_w(px(180.0))
                             .gap(px(4.0))
                             .child(
                                 div()
@@ -202,6 +207,7 @@ impl Render for ResizerView {
                     .child(
                         div()
                             .flex()
+                            .flex_wrap()
                             .items_center()
                             .gap(px(8.0))
                             .child(
@@ -234,8 +240,10 @@ impl Render for ResizerView {
                     .child(
                         div()
                             .flex()
+                            .flex_wrap()
                             .items_center()
                             .justify_between()
+                            .gap(px(8.0))
                             .child(
                                 div()
                                     .text_sm()

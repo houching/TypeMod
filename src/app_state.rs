@@ -372,7 +372,9 @@ impl AppState {
     }
 
     pub fn save_temp_state(&self) -> anyhow::Result<PathBuf> {
-        let temp_path = std::env::temp_dir().join("segoeui_changer_state.json");
+        let dir = Self::app_docs_dir();
+        fs::create_dir_all(&dir)?;
+        let temp_path = dir.join(format!("temp_state_{}.json", std::process::id()));
         let json = serde_json::to_string_pretty(&self.config)?;
         fs::write(&temp_path, json)?;
         Ok(temp_path)

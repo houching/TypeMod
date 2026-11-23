@@ -20,6 +20,7 @@ pub struct SettingsView {
     state: Entity<AppState>,
     dpi_track_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     is_dragging_dpi: bool,
+    cached_backup: (usize, usize),
 }
 
 impl SettingsView {
@@ -28,6 +29,7 @@ impl SettingsView {
             state,
             dpi_track_bounds: Rc::new(Cell::new(None)),
             is_dragging_dpi: false,
+            cached_backup: backup_status(),
         }
     }
 
@@ -82,10 +84,11 @@ impl SettingsView {
         });
     }
 
-    fn run_backup_now(&self, cx: &mut Context<Self>) {
+    fn run_backup_now(&mut self, cx: &mut Context<Self>) {
         match ensure_backup() {
             Ok(dir) => {
                 let (have, total) = backup_status();
+                self.cached_backup = (have, total);
                 self.state.update(cx, |s, cx| {
                     s.last_error = None;
                     s.last_notice = Some(format!(
@@ -243,13 +246,13 @@ impl Render for SettingsView {
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|| "Not detected".to_string());
         let ff_ok = s.fontforge_path.is_some();
-        let (bak_have, bak_total) = backup_status();
+        let (bak_have, bak_total) = self.cached_backup;
 
         let toggles: [(&'static str, &'static str, &'static str, bool); 5] = [
             (
                 "italic",
                 "Italic Font Replacement",
-                "Enable separate Italic Latin & Khmer font slots (6 additional weights).",
+                "Enable separate Italic Latin & Secondary Script font slots (6 additional weights).",
                 cfg.enable_italic,
             ),
             (
@@ -281,6 +284,7 @@ impl Render for SettingsView {
         div()
             .id("settings-scroll")
             .flex_1()
+            .min_h_0()
             .min_w_0()
             .overflow_y_scroll()
             .p(px(20.0))
@@ -368,6 +372,8 @@ impl Render for SettingsView {
                                 div()
                                     .flex()
                                     .flex_col()
+                                    .flex_1()
+                                    .min_w(px(200.0))
                                     .child(
                                         div()
                                             .text_sm()
@@ -391,6 +397,7 @@ impl Render for SettingsView {
 
                                 div()
                                     .flex()
+                                    .flex_wrap()
                                     .items_center()
                                     .gap(px(12.0))
                                     .child(
@@ -547,6 +554,8 @@ impl Render for SettingsView {
                                 div()
                                     .flex()
                                     .flex_col()
+                                    .flex_1()
+                                    .min_w(px(180.0))
                                     .child(div().text_sm().font_weight(gpui::FontWeight::MEDIUM).text_color(theme.text).child(title))
                                     .child(div().text_xs().text_color(theme.text_3).child(desc)),
                             )
