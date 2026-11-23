@@ -24,7 +24,11 @@ pub fn is_variable_font(path: &Path) -> bool {
     if file.read_exact(&mut directory).is_err() {
         return false;
     }
-    directory.chunks_exact(16).any(|rec| &rec[..4] == b"fvar")
+    directory
+        .as_chunks::<16>()
+        .0
+        .iter()
+        .any(|rec| &rec[..4] == b"fvar")
 }
 
 pub fn auto_detect_weights(
