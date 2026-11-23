@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-labelledby="title-sym">
+  <title id="title-sym">SegoeUI Changer symbol</title>
+  <g id="symbol">
+    <path fill="#4C77F7" d="M 56 24 H 204 V 70 H 70 V 106 H 134 L 88 152 H 24 V 56 A 32 32 0 0 1 56 24 Z"/>
+    <path fill="#15181D" d="M 200 232 H 52 V 186 H 186 V 150 H 122 L 168 104 H 232 V 200 A 32 32 0 0 1 200 232 Z"/>
+  </g>
+</svg>

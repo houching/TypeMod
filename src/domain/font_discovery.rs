@@ -1,0 +1,176 @@
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use read_fonts::{FontRef, TableProvider};
+
+use crate::app_state::FontFamilySelection;
+
+pub fn is_variable_font(path: &Path) -> bool {
+    let Ok(bytes) = fs::read(path) else {
+        return false;
+    };
+    let Ok(font) = FontRef::new(&bytes) else {
+        return false;
+    };
+    font.fvar().is_ok()
+}
+
+pub fn auto_detect_weights(
+    reg_path: &Path,
+    reg_name: Option<&str>,
+    installed_fonts: &[(String, PathBuf)],
+) -> FontFamilySelection {
+    let mut sel = FontFamilySelection {
+        regular: Some(reg_path.to_path_buf()),
+        is_variable: is_variable_font(reg_path),
+        display_name: reg_name.map(ToString::to_string).or_else(|| {
+            reg_path
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+        }),
+        ..Default::default()
+    };
+
+    if sel.is_variable {
+        return sel;
+    }
+
+    if let Some(dir) = reg_path.parent()
+        && let Ok(entries) = fs::read_dir(dir)
+    {
+        let stem_base = extract_family_stem(reg_path);
+        let files: Vec<PathBuf> = entries
+            .filter_map(|e| e.ok().map(|x| x.path()))
+            .filter(|p| {
+                p.extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "ttf" | "otf"))
+            })
+            .collect();
+
+        for path in &files {
+            if path == reg_path {
+                continue;
+            }
+            let name_lc = path
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_ascii_lowercase())
+                .unwrap_or_default();
+
+            if !stem_base.is_empty() && !name_lc.contains(&stem_base) {
+                continue;
+            }
+            if name_lc.contains("italic") || name_lc.contains("oblique") {
+                continue;
+            }
+
+            assign_weight_by_name(&mut sel, &name_lc, path);
+        }
+    }
+
+    if let Some(base_name) = reg_name {
+        let family = strip_weight_suffix(base_name);
+        for (name, path) in installed_fonts {
+            let name_lc = name.to_ascii_lowercase();
+            if !name_lc.starts_with(&family.to_ascii_lowercase()) {
+                continue;
+            }
+            if name_lc.contains("italic") || name_lc.contains("oblique") {
+                continue;
+            }
+            assign_weight_by_name(&mut sel, &name_lc, path);
+        }
+    }
+
+    sel
+}
+
+fn extract_family_stem(path: &Path) -> String {
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    for suffix in [
+        "-regular",
+        "_regular",
+        " regular",
+        "-variable",
+        "_variable",
+        "variable",
+        "regular",
+    ] {
+        if let Some(stripped) = stem.strip_suffix(suffix) {
+            return stripped.trim_end_matches(['-', '_', ' ']).to_string();
+        }
+    }
+    stem
+}
+
+fn strip_weight_suffix(name: &str) -> String {
+    let mut out = name.trim().to_string();
+    for suffix in [
+        " Regular",
+        " Light",
+        " Semilight",
+        " SemiLight",
+        " Semibold",
+        " SemiBold",
+        " Bold",
+        " Black",
+    ] {
+        if let Some(s) = out.strip_suffix(suffix) {
+            out = s.to_string();
+            break;
+        }
+    }
+    out
+}
+
+fn assign_weight_by_name(sel: &mut FontFamilySelection, name_lc: &str, path: &Path) {
+    if sel.semilight.is_none() && (name_lc.contains("semilight") || name_lc.contains("demilight")) {
+        sel.semilight = Some(path.to_path_buf());
+    } else if sel.light.is_none() && name_lc.contains("light") {
+        sel.light = Some(path.to_path_buf());
+    } else if sel.semibold.is_none()
+        && (name_lc.contains("semibold") || name_lc.contains("demibold"))
+    {
+        sel.semibold = Some(path.to_path_buf());
+    } else if sel.bold.is_none() && name_lc.contains("bold") {
+        sel.bold = Some(path.to_path_buf());
+    } else if sel.black.is_none() && (name_lc.contains("black") || name_lc.contains("heavy")) {
+        sel.black = Some(path.to_path_buf());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn family_stem_extraction() {
+        assert_eq!(
+            extract_family_stem(Path::new("C:/Fonts/Inter-Regular.ttf")),
+            "inter"
+        );
+        assert_eq!(
+            extract_family_stem(Path::new("C:/Fonts/KantumruyPro-Regular.ttf")),
+            "kantumruypro"
+        );
+    }
+
+    #[test]
+    fn weight_matching_distinguishes_semi_variants() {
+        let mut sel = FontFamilySelection::default();
+        assign_weight_by_name(&mut sel, "inter semibold", Path::new("Inter-SemiBold.ttf"));
+        assign_weight_by_name(&mut sel, "inter bold", Path::new("Inter-Bold.ttf"));
+        assign_weight_by_name(&mut sel, "inter semilight", Path::new("Inter-SemiLight.ttf"));
+        assign_weight_by_name(&mut sel, "inter light", Path::new("Inter-Light.ttf"));
+        assign_weight_by_name(&mut sel, "inter black", Path::new("Inter-Black.ttf"));
+
+        assert_eq!(sel.semibold.unwrap(), Path::new("Inter-SemiBold.ttf"));
+        assert_eq!(sel.bold.unwrap(), Path::new("Inter-Bold.ttf"));
+        assert_eq!(sel.semilight.unwrap(), Path::new("Inter-SemiLight.ttf"));
+        assert_eq!(sel.light.unwrap(), Path::new("Inter-Light.ttf"));
+        assert_eq!(sel.black.unwrap(), Path::new("Inter-Black.ttf"));
+    }
+}

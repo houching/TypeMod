@@ -1,0 +1,17 @@
+# Rust build artifacts
+target/
+
+# Temporary and local work files
+tmp/
+work/
+Original_Segoe_Backups/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Logs, archives, OS files
+*.log
+*.zip
+.DS_Store
+Thumbs.db

@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256"><title>SegoeUI Changer symbol</title><rect width="256" height="256" rx="57.6" fill="#4C77F7"/><g transform="translate(33.92 33.92) scale(0.735)" fill="#FFFFFF">
+  <title id="title-sym-small">SegoeUI Changer symbol (small-size cut)</title>
+  <!-- Small-size cut (16-24 px): widened 45-degree swap channel (40px horizontal / ~28px perpendicular)
+       and slightly heavier 52px bars so the negative space never bridges at 16px. -->
+  <g id="symbol">
+    <path fill="#FFFFFF" d="M 56 20 H 208 V 72 H 72 V 100 H 132 L 80 152 H 20 V 56 A 36 36 0 0 1 56 20 Z"/>
+    <path fill="#FFFFFF" d="M 200 236 H 48 V 184 H 184 V 156 H 124 L 176 104 H 236 V 200 A 36 36 0 0 1 200 236 Z"/>
+  </g>
+</g></svg>
