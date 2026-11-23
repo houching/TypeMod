@@ -21,7 +21,8 @@ fn to_wide_null(s: &str) -> Vec<u16> {
 pub fn relaunch_elevated(state_path: &Path) -> anyhow::Result<bool> {
     let exe = std::env::current_exe()?;
     let exe_w = to_wide_null(&exe.to_string_lossy());
-    let params = format!("--state \"{}\"", state_path.to_string_lossy());
+    let escaped_state = state_path.to_string_lossy().replace('"', "\\\"");
+    let params = format!("--state \"{escaped_state}\"");
     let params_w = to_wide_null(&params);
 
     let hinst = unsafe {

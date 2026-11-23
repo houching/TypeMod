@@ -69,7 +69,7 @@ pub fn auto_detect_weights(
                 .map(|s| s.to_string_lossy().to_ascii_lowercase())
                 .unwrap_or_default();
 
-            if !stem_base.is_empty() && !name_lc.contains(&stem_base) {
+            if !stem_base.is_empty() && !matches_family_prefix(&name_lc, &stem_base) {
                 continue;
             }
             if name_lc.contains("italic") || name_lc.contains("oblique") {
@@ -81,10 +81,10 @@ pub fn auto_detect_weights(
     }
 
     if let Some(base_name) = reg_name {
-        let family = strip_weight_suffix(base_name);
+        let family = strip_weight_suffix(base_name).to_ascii_lowercase();
         for (name, path) in installed_fonts {
             let name_lc = name.to_ascii_lowercase();
-            if !name_lc.starts_with(&family.to_ascii_lowercase()) {
+            if !matches_family_prefix(&name_lc, &family) {
                 continue;
             }
             if name_lc.contains("italic") || name_lc.contains("oblique") {
@@ -138,16 +138,34 @@ fn strip_weight_suffix(name: &str) -> String {
     out
 }
 
+fn matches_family_prefix(candidate_lc: &str, family_lc: &str) -> bool {
+    if family_lc.is_empty() {
+        return true;
+    }
+    let Some(rest) = candidate_lc.strip_prefix(family_lc) else {
+        return false;
+    };
+    rest.is_empty() || rest.starts_with(['-', '_', ' '])
+}
+
 fn assign_weight_by_name(sel: &mut FontFamilySelection, name_lc: &str, path: &Path) {
     if sel.semilight.is_none() && (name_lc.contains("semilight") || name_lc.contains("demilight")) {
         sel.semilight = Some(path.to_path_buf());
-    } else if sel.light.is_none() && name_lc.contains("light") {
+    } else if sel.light.is_none()
+        && name_lc.contains("light")
+        && !name_lc.contains("extralight")
+        && !name_lc.contains("ultralight")
+    {
         sel.light = Some(path.to_path_buf());
     } else if sel.semibold.is_none()
         && (name_lc.contains("semibold") || name_lc.contains("demibold"))
     {
         sel.semibold = Some(path.to_path_buf());
-    } else if sel.bold.is_none() && name_lc.contains("bold") {
+    } else if sel.bold.is_none()
+        && name_lc.contains("bold")
+        && !name_lc.contains("extrabold")
+        && !name_lc.contains("ultrabold")
+    {
         sel.bold = Some(path.to_path_buf());
     } else if sel.black.is_none() && (name_lc.contains("black") || name_lc.contains("heavy")) {
         sel.black = Some(path.to_path_buf());

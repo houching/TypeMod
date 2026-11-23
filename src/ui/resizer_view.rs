@@ -20,23 +20,28 @@ impl ResizerView {
     }
 
     fn refresh_metrics(&self, cx: &mut Context<Self>) {
-        match resizer::get_current_metrics() {
-            Ok(m) => {
-                self.state.update(cx, |s, cx| {
-                    s.uniform_pt = m.message;
-                    s.sizes = m;
-                    s.last_error = None;
-                    s.last_notice = Some("Refreshed current Windows font metrics.".to_string());
-                    cx.notify();
-                });
-            }
-            Err(e) => {
-                self.state.update(cx, |s, cx| {
-                    s.last_error = Some(format!("Failed to read metrics: {e}"));
-                    cx.notify();
-                });
-            }
-        }
+        let state = self.state.clone();
+        cx.spawn(async move |_, cx| {
+            let res = cx
+                .background_executor()
+                .spawn(async move { resizer::get_current_metrics() })
+                .await;
+            let _ = state.update(cx, |s, cx| {
+                match res {
+                    Ok(m) => {
+                        s.uniform_pt = m.message.clamp(6, 24);
+                        s.sizes = m;
+                        s.last_error = None;
+                        s.last_notice = Some("Refreshed current Windows font metrics.".to_string());
+                    }
+                    Err(e) => {
+                        s.last_error = Some(format!("Failed to read metrics: {e}"));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn adjust_uniform(&self, delta: i32, cx: &mut Context<Self>) {
@@ -62,42 +67,53 @@ impl ResizerView {
     }
 
     fn apply_uniform(&self, cx: &mut Context<Self>) {
-        let pt = self.state.read(cx).uniform_pt;
-        match resizer::apply_entire_size(pt) {
-            Ok(updated) => {
-                self.state.update(cx, |s, cx| {
-                    s.sizes = updated;
-                    s.last_error = None;
-                    s.last_notice = Some(format!("Applied {pt} pt to all system UI elements."));
-                    cx.notify();
-                });
-            }
-            Err(e) => {
-                self.state.update(cx, |s, cx| {
-                    s.last_error = Some(format!("Failed to apply uniform size: {e}"));
-                    cx.notify();
-                });
-            }
-        }
+        let pt = self.state.read(cx).uniform_pt.clamp(6, 24);
+        let state = self.state.clone();
+        cx.spawn(async move |_, cx| {
+            let res = cx
+                .background_executor()
+                .spawn(async move { resizer::apply_entire_size(pt) })
+                .await;
+            let _ = state.update(cx, |s, cx| {
+                match res {
+                    Ok(updated) => {
+                        s.uniform_pt = pt;
+                        s.sizes = updated;
+                        s.last_error = None;
+                        s.last_notice = Some(format!("Applied {pt} pt to all system UI elements."));
+                    }
+                    Err(e) => {
+                        s.last_error = Some(format!("Failed to apply uniform size: {e}"));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn apply_individual(&self, cx: &mut Context<Self>) {
         let sizes: SystemFontSizes = self.state.read(cx).sizes.clone();
-        match resizer::apply_system_metrics(&sizes) {
-            Ok(()) => {
-                self.state.update(cx, |s, cx| {
-                    s.last_error = None;
-                    s.last_notice = Some("Applied individual system font metrics.".to_string());
-                    cx.notify();
-                });
-            }
-            Err(e) => {
-                self.state.update(cx, |s, cx| {
-                    s.last_error = Some(format!("Failed to apply metrics: {e}"));
-                    cx.notify();
-                });
-            }
-        }
+        let state = self.state.clone();
+        cx.spawn(async move |_, cx| {
+            let res = cx
+                .background_executor()
+                .spawn(async move { resizer::apply_system_metrics(&sizes) })
+                .await;
+            let _ = state.update(cx, |s, cx| {
+                match res {
+                    Ok(()) => {
+                        s.last_error = None;
+                        s.last_notice = Some("Applied individual system font metrics.".to_string());
+                    }
+                    Err(e) => {
+                        s.last_error = Some(format!("Failed to apply metrics: {e}"));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 }
 
@@ -315,6 +331,10 @@ impl Render for ResizerView {
                     })),
             )
             )
-            .child(crate::ui::components::vertical_scrollbar(&self.scroll_handle, theme))
+            .child(crate::ui::components::vertical_scrollbar(
+                &self.scroll_handle,
+                "resizer-scroll-bar",
+                theme,
+            ))
     }
 }

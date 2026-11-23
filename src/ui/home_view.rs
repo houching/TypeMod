@@ -70,9 +70,14 @@ impl HomeView {
 
     fn browse_regular(&self, slot: FontTargetSlot, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
-            let Some(path) = FileDialog::new()
-                .add_filter("Font Files", &["ttf", "otf"])
-                .pick_file()
+            let Some(path) = cx
+                .background_executor()
+                .spawn(async move {
+                    FileDialog::new()
+                        .add_filter("Font Files", &["ttf", "otf"])
+                        .pick_file()
+                })
+                .await
             else {
                 return;
             };
@@ -84,6 +89,9 @@ impl HomeView {
 
             let _ = this.update(cx, |view, cx| {
                 view.state.update(cx, |s, cx| {
+                    if s.is_busy {
+                        return;
+                    }
                     *slot.select_mut(&mut s.config) = detected;
                     s.last_error = None;
                     let _ = s.save_config();
@@ -96,15 +104,23 @@ impl HomeView {
 
     fn browse_weight(&self, slot: FontTargetSlot, weight: WeightKind, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
-            let Some(path) = FileDialog::new()
-                .add_filter("Font Files", &["ttf", "otf"])
-                .pick_file()
+            let Some(path) = cx
+                .background_executor()
+                .spawn(async move {
+                    FileDialog::new()
+                        .add_filter("Font Files", &["ttf", "otf"])
+                        .pick_file()
+                })
+                .await
             else {
                 return;
             };
 
             let _ = this.update(cx, |view, cx| {
                 view.state.update(cx, |s, cx| {
+                    if s.is_busy {
+                        return;
+                    }
                     let target = slot.select_mut(&mut s.config);
                     match weight {
                         WeightKind::Light => target.light = Some(path),
@@ -212,9 +228,10 @@ impl HomeView {
 
             let mut final_res: Option<anyhow::Result<()>> = None;
             loop {
-                while let Ok(msg) = rx.try_recv() {
-                    match msg {
-                        WorkerMsg::Progress(ev) => {
+                let mut disconnected = false;
+                loop {
+                    match rx.try_recv() {
+                        Ok(WorkerMsg::Progress(ev)) => {
                             let _ = state.update(cx, |s, cx| {
                                 match ev {
                                     BuildProgressEvent::Step { progress, status } => {
@@ -226,12 +243,21 @@ impl HomeView {
                                 cx.notify();
                             });
                         }
-                        WorkerMsg::Done(res) => {
+                        Ok(WorkerMsg::Done(res)) => {
                             final_res = Some(res);
+                        }
+                        Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                            disconnected = true;
+                            break;
                         }
                     }
                 }
                 if final_res.is_some() {
+                    break;
+                }
+                if disconnected {
+                    final_res = Some(Err(anyhow::anyhow!("Build worker terminated unexpectedly.")));
                     break;
                 }
                 cx.background_executor()
@@ -302,26 +328,38 @@ impl HomeView {
         let state_handle = self.state.clone();
         let confirm_modal = self.confirm_modal.clone();
         let run_restore = move |delete_clones: bool, cx: &mut gpui::App| {
-            match restore_original_fonts(delete_clones) {
-                Ok(()) => {
-                    state_handle.update(cx, |s, cx| {
-                        s.system_state = check_system_state();
-                        s.clones_installed = are_clones_installed();
-                        s.last_error = None;
-                        s.last_notice = Some(
-                            "Restored stock Segoe UI registry entries. REBOOT REQUIRED to finalize."
-                                .to_string(),
-                        );
-                        cx.notify();
-                    });
-                }
-                Err(e) => {
-                    state_handle.update(cx, |s, cx| {
-                        s.last_error = Some(format!("Restore failed: {e}"));
-                        cx.notify();
-                    });
-                }
-            }
+            let state_bg = state_handle.clone();
+            state_handle.update(cx, |s, cx| {
+                s.is_busy = true;
+                s.last_error = None;
+                s.last_notice = Some("Restoring stock Segoe UI registry entries...".to_string());
+                cx.notify();
+            });
+            cx.spawn(async move |cx| {
+                let res = cx
+                    .background_executor()
+                    .spawn(async move { restore_original_fonts(delete_clones) })
+                    .await;
+                let _ = state_bg.update(cx, |s, cx| {
+                    s.is_busy = false;
+                    match res {
+                        Ok(()) => {
+                            s.system_state = check_system_state();
+                            s.clones_installed = are_clones_installed();
+                            s.last_error = None;
+                            s.last_notice = Some(
+                                "Restored stock Segoe UI registry entries. REBOOT REQUIRED to finalize."
+                                    .to_string(),
+                            );
+                        }
+                        Err(e) => {
+                            s.last_error = Some(format!("Restore failed: {e}"));
+                        }
+                    }
+                    cx.notify();
+                });
+            })
+            .detach();
         };
 
         self.confirm_modal.update(cx, |m, cx| {
@@ -333,18 +371,21 @@ impl HomeView {
                     dangerous: true,
                     on_confirm: Box::new(move |window, cx| {
                         if has_clones {
-                            confirm_modal.update(cx, |m2, cx| {
-                                m2.open(
-                                    ConfirmRequest {
-                                        title: "Remove Segoe UI Clone?".to_string(),
-                                        message: "Segoe UI Clone fonts are installed. Do you want to remove them as well?".to_string(),
-                                        confirm_label: "Remove Clones".to_string(),
-                                        dangerous: true,
-                                        on_confirm: Box::new(move |_, cx| run_restore(true, cx)),
-                                    },
-                                    window,
-                                    cx,
-                                );
+                            let modal = confirm_modal.clone();
+                            window.defer(cx, move |window, cx| {
+                                modal.update(cx, |m2, cx| {
+                                    m2.open(
+                                        ConfirmRequest {
+                                            title: "Remove Segoe UI Clone?".to_string(),
+                                            message: "Segoe UI Clone fonts are installed. Do you want to remove them as well? (Press Cancel to keep clones and still restore.)".to_string(),
+                                            confirm_label: "Remove Clones".to_string(),
+                                            dangerous: true,
+                                            on_confirm: Box::new(move |_, cx| run_restore(true, cx)),
+                                        },
+                                        window,
+                                        cx,
+                                    );
+                                });
                             });
                         } else {
                             run_restore(false, cx);
@@ -591,7 +632,11 @@ impl Render for HomeView {
 
         let active_scripts = cfg.active_scripts();
         let script_name = cfg.active_scripts_summary();
-        let ff_ready = s.fontforge_path.is_some();
+        let ff_ready = s.fontforge_path.is_some()
+            || s.config
+                .custom_fontforge_path
+                .as_ref()
+                .is_some_and(|p| p.exists());
         let can_build = !is_busy && cfg.latin.has_regular();
         let pct_label = format!("{}%", (progress * 100.0).round() as u32);
 
@@ -611,6 +656,9 @@ impl Render for HomeView {
             .child(
                 div()
                     .relative()
+                    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                        cx.stop_propagation();
+                    })
                     .child(
                         VantageButton::new(
                             "script-dropdown-trigger",
@@ -940,6 +988,10 @@ impl Render for HomeView {
                     ),
             )
             )
-            .child(crate::ui::components::vertical_scrollbar(&self.scroll_handle, theme))
+            .child(crate::ui::components::vertical_scrollbar(
+                &self.scroll_handle,
+                "home-scroll-bar",
+                theme,
+            ))
     }
 }

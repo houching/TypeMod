@@ -244,14 +244,30 @@ impl TextFieldState {
                             .when(show_cursor, |d| d.child(caret().mr(px(2.0))))
                             .child(SharedString::from(placeholder.to_string()))
                     } else {
+                        let visible_before = if is_focused {
+                            let count = before.chars().count();
+                            if count > 48 {
+                                let skip = count - 48;
+                                let byte_idx = before
+                                    .char_indices()
+                                    .nth(skip)
+                                    .map(|(i, _)| i)
+                                    .unwrap_or(0);
+                                format!("…{}", &before[byte_idx..])
+                            } else {
+                                before.to_string()
+                            }
+                        } else {
+                            before.to_string()
+                        };
                         div()
                             .flex()
                             .items_center()
                             .min_w_0()
-                            .when(!before.is_empty(), |d| {
-                                d.child(SharedString::from(before.to_string()))
+                            .when(!visible_before.is_empty(), |d| {
+                                d.child(SharedString::from(visible_before))
                             })
-                            .when(show_cursor, |d| d.child(caret()))
+                            .when(show_cursor, |d| d.child(caret().flex_shrink_0()))
                             .when(!after.is_empty(), |d| {
                                 d.child(SharedString::from(after.to_string()))
                             })

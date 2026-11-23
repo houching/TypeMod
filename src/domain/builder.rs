@@ -113,9 +113,23 @@ pub fn ensure_fonttools_python(
             .is_ok_and(|o| o.status.success())
     };
 
-    let sys_python = PathBuf::from("python");
-    if has_fonttools(&sys_python) {
-        return Ok(sys_python);
+    let sys_python = Command::new("where")
+        .arg("python")
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .map(str::trim)
+                .find(|p| !p.is_empty() && !p.to_ascii_lowercase().contains("\\windowsapps\\"))
+                .map(PathBuf::from)
+        });
+    if let Some(ref py) = sys_python
+        && has_fonttools(py)
+    {
+        return Ok(py.clone());
     }
 
     let ff_python = ff_exe.with_file_name("ffpython.exe");
@@ -124,7 +138,7 @@ pub fn ensure_fonttools_python(
     }
 
     let install_with = |py_exe: &Path, on_log: &mut dyn FnMut(String)| -> bool {
-        let Ok(mut child) = Command::new(py_exe)
+        let Ok(child) = Command::new(py_exe)
             .args(["-u", "-m", "pip", "install", "fonttools"])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -134,17 +148,17 @@ pub fn ensure_fonttools_python(
             return false;
         };
 
-        if let Some(stdout) = child.stdout.take() {
-            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                on_log(line);
-            }
-        }
-        child.wait().is_ok_and(|s| s.success()) && has_fonttools(py_exe)
+        let never_cancel = AtomicBool::new(false);
+        wait_child_with_cancel(child, &never_cancel, |_is_err, line| on_log(line))
+            .is_ok_and(|s| s.success())
+            && has_fonttools(py_exe)
     };
 
     on_log("[Setup] Installing Python 'fonttools' via pip...".to_string());
-    if install_with(&sys_python, &mut on_log) {
-        return Ok(sys_python);
+    if let Some(ref py) = sys_python
+        && install_with(py, &mut on_log)
+    {
+        return Ok(py.clone());
     }
     if ff_python.exists() && install_with(&ff_python, &mut on_log) {
         return Ok(ff_python);
@@ -398,6 +412,14 @@ pub fn run_build_and_apply(
     let slicer_script = scripts.join("variable_slicer.py");
     let work_dir = AppState::app_docs_dir().join("work");
     fs::create_dir_all(&work_dir)?;
+    if let Ok(entries) = fs::read_dir(&work_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.ends_with("_system_mod.ttf") || name.starts_with("temp_") {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
+    }
 
     let mut temp_files: Vec<PathBuf> = Vec::new();
     let mut full_log = String::new();
@@ -416,10 +438,19 @@ pub fn run_build_and_apply(
     let extra_ranges_vec = config.active_script_ranges();
     let extra_ranges = extra_ranges_vec.as_slice();
     let active_scripts = config.active_scripts();
+    let primary_script = active_scripts[0];
+    let primary_sel = config.script_font(primary_script).cloned().unwrap_or_default();
+    let primary_italic_sel = config
+        .script_italic_font(primary_script)
+        .cloned()
+        .unwrap_or_default();
     let extra_scripts: Vec<_> = active_scripts.iter().copied().skip(1).collect();
     let khmer_same_as_latin =
-        config.khmer.has_regular() && config.khmer.regular == config.latin.regular;
+        primary_sel.has_regular() && primary_sel.regular == config.latin.regular;
     let italic_enabled = config.enable_italic && config.latin_italic.has_regular();
+    let khmi_same_as_latin_italic = italic_enabled
+        && primary_italic_sel.has_regular()
+        && primary_italic_sel.regular == config.latin_italic.regular;
     let any_extra_var = extra_scripts.iter().any(|&sc| {
         config
             .script_font(sc)
@@ -427,13 +458,15 @@ pub fn run_build_and_apply(
             || (italic_enabled
                 && config
                     .script_italic_font(sc)
-                    .is_some_and(|f| f.has_regular() && f.is_variable))
+                    .is_some_and(|f| f.has_regular() && f.is_variable && f.regular != config.latin_italic.regular))
     });
     let any_variable = (config.latin.has_regular() && config.latin.is_variable)
-        || (!khmer_same_as_latin && config.khmer.has_regular() && config.khmer.is_variable)
+        || (!khmer_same_as_latin && primary_sel.has_regular() && primary_sel.is_variable)
         || (italic_enabled
             && ((config.latin_italic.has_regular() && config.latin_italic.is_variable)
-                || (config.khmer_italic.has_regular() && config.khmer_italic.is_variable)))
+                || (!khmi_same_as_latin_italic
+                    && primary_italic_sel.has_regular()
+                    && primary_italic_sel.is_variable)))
         || any_extra_var;
 
     let slicer_python = if any_variable {
@@ -481,15 +514,15 @@ pub fn run_build_and_apply(
 
         let tx2 = tx.clone();
         let h_khm = (!khmer_same_as_latin)
-            .then(|| s.spawn(move || run_slice(&config.khmer, "khm", 0.20, 0.08, tx2)));
+            .then(|| s.spawn(move || run_slice(&primary_sel, "khm", 0.20, 0.08, tx2)));
 
         let tx3 = tx.clone();
         let h_lati = italic_enabled
             .then(|| s.spawn(move || run_slice(&config.latin_italic, "lati", 0.28, 0.01, tx3)));
 
         let tx4 = tx.clone();
-        let h_khmi = italic_enabled
-            .then(|| s.spawn(move || run_slice(&config.khmer_italic, "khmi", 0.29, 0.01, tx4)));
+        let h_khmi = (italic_enabled && !khmi_same_as_latin_italic)
+            .then(|| s.spawn(move || run_slice(&primary_italic_sel, "khmi", 0.29, 0.01, tx4)));
 
         drop(tx);
         for ev in rx {
@@ -687,11 +720,13 @@ pub fn run_build_and_apply(
         .collect();
 
     let fonts_dir = windows_fonts_dir();
-    let tag = std::time::SystemTime::now()
+    let ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
+        .map(|d| d.as_millis())
         .unwrap_or(1);
+    let tag = format!("{ms}_{}", std::process::id());
     let mut reg_updates: Vec<(&str, String)> = Vec::new();
+    let mut copied_paths: Vec<PathBuf> = Vec::new();
     let mut has_base_segoe = false;
     for (file_name, reg_key) in &generated {
         let src = work_dir.join(file_name);
@@ -701,13 +736,20 @@ pub fn run_build_and_apply(
             }
             let tagged_name = file_name.replace(".ttf", &format!("_{tag}.ttf"));
             let dst = fonts_dir.join(&tagged_name);
-            fs::copy(&src, &dst).map_err(|e| {
-                anyhow::anyhow!("Failed to install {} to {}: {e}", tagged_name, dst.display())
-            })?;
+            if let Err(e) = fs::copy(&src, &dst) {
+                for p in &copied_paths {
+                    let _ = fs::remove_file(p);
+                }
+                anyhow::bail!("Failed to install {} to {}: {e}", tagged_name, dst.display());
+            }
+            copied_paths.push(dst);
             reg_updates.push((*reg_key, tagged_name));
         }
     }
     if !has_base_segoe {
+        for p in &copied_paths {
+            let _ = fs::remove_file(p);
+        }
         anyhow::bail!(
             "FontForge finished but segoeui_system_mod.ttf was not produced in {}",
             work_dir.display()
@@ -717,7 +759,12 @@ pub fn run_build_and_apply(
         .iter()
         .map(|(k, v)| (*k, v.as_str()))
         .collect();
-    set_font_registry_entries(&reg_refs)?;
+    if let Err(e) = set_font_registry_entries(&reg_refs) {
+        for p in &copied_paths {
+            let _ = fs::remove_file(p);
+        }
+        return Err(e);
+    }
     let _ = crate::domain::registry::cleanup_stale_mod_files();
     // Point Desktop/Explorer WindowMetrics from "Segoe UI Variable Text" to "Segoe UI"
     let _ = crate::domain::resizer::set_system_font_face("Segoe UI");
@@ -867,6 +914,7 @@ fn run_fontforge_engine(
                             break;
                         }
                         Err(e) => {
+                            inv.cancel.store(true, Ordering::Relaxed);
                             let _ = tx.send(WorkerMsg::Err(e.to_string()));
                             break;
                         }
@@ -895,6 +943,7 @@ fn run_fontforge_engine(
                     });
                 }
                 WorkerMsg::Err(err) => {
+                    inv.cancel.store(true, Ordering::Relaxed);
                     if first_error.is_none() {
                         first_error = Some(err);
                     }

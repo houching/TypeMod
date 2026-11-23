@@ -460,13 +460,30 @@ impl Render for ShellView {
                                                     .icon("icons/refresh-cw.svg")
                                                     .variant(ButtonVariant::Secondary)
                                                     .on_click(cx.listener(|this, _, _, cx| {
-                                                        crate::domain::registry::live_refresh_font_cache();
-                                                        this.state.update(cx, |s, cx| {
-                                                            s.last_notice = Some(
-                                                                "Refreshed FontCache, WM_FONTCHANGE, and Explorer. Reboot still recommended for full OS coverage.".to_string(),
-                                                            );
+                                                        if this.state.read(cx).is_busy {
+                                                            return;
+                                                        }
+                                                        let state = this.state.clone();
+                                                        state.update(cx, |s, cx| {
+                                                            s.is_busy = true;
+                                                            s.last_notice = Some("Refreshing Windows FontCache and Explorer...".to_string());
                                                             cx.notify();
                                                         });
+                                                        cx.spawn(async move |_, cx| {
+                                                            cx.background_executor()
+                                                                .spawn(async move {
+                                                                    crate::domain::registry::live_refresh_font_cache();
+                                                                })
+                                                                .await;
+                                                            let _ = state.update(cx, |s, cx| {
+                                                                s.is_busy = false;
+                                                                s.last_notice = Some(
+                                                                    "Refreshed FontCache, WM_FONTCHANGE, and Explorer. Reboot still recommended for full OS coverage.".to_string(),
+                                                                );
+                                                                cx.notify();
+                                                            });
+                                                        })
+                                                        .detach();
                                                     })),
                                             )
                                             .child(

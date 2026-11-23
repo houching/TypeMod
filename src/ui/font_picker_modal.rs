@@ -91,11 +91,23 @@ impl FontPickerModal {
         self.target = target;
         self.input.clear();
         self.selected_idx = 0;
-        self.fonts = list_installed_fonts();
+        self.fonts.clear();
         self.is_open = true;
         window.focus(&self.input.focus_handle);
         self.start_blink(cx);
         cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let fonts = cx
+                .background_executor()
+                .spawn(async move { list_installed_fonts() })
+                .await;
+            let _ = this.update(cx, |modal, cx| {
+                modal.fonts = fonts;
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     pub fn close(&mut self, cx: &mut Context<Self>) {
@@ -132,6 +144,7 @@ impl FontPickerModal {
             "up" => {
                 if self.selected_idx > 0 {
                     self.selected_idx -= 1;
+                    self.scroll_handle.scroll_to_item(self.selected_idx);
                     cx.notify();
                 }
             }
@@ -139,6 +152,7 @@ impl FontPickerModal {
                 let (_, filtered) = self.filtered_fonts();
                 if !filtered.is_empty() && self.selected_idx + 1 < filtered.len() {
                     self.selected_idx += 1;
+                    self.scroll_handle.scroll_to_item(self.selected_idx);
                     cx.notify();
                 }
             }
@@ -344,7 +358,11 @@ impl Render for FontPickerModal {
                                             )
                                     })),
                             )
-                            .child(crate::ui::components::vertical_scrollbar(&self.scroll_handle, theme)),
+                            .child(crate::ui::components::vertical_scrollbar(
+                                &self.scroll_handle,
+                                "picker-scroll-bar",
+                                theme,
+                            )),
                     ),
             )
             .into_any_element()

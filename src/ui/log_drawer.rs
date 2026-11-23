@@ -152,7 +152,11 @@ impl Render for LogDrawer {
                                     .collect()
                             }),
                     )
-                    .child(crate::ui::components::vertical_scrollbar(&self.scroll_handle, theme)),
+                    .child(crate::ui::components::vertical_scrollbar(
+                        &self.scroll_handle,
+                        "log-scroll-bar",
+                        theme,
+                    )),
             )
             .into_any_element()
     }

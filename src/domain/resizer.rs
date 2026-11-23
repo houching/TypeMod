@@ -69,11 +69,11 @@ pub fn apply_system_metrics(sizes: &SystemFontSizes) -> anyhow::Result<()> {
         )?;
     }
 
-    ncm.lfCaptionFont.lfHeight = pt_to_height(sizes.caption);
-    ncm.lfSmCaptionFont.lfHeight = pt_to_height(sizes.sm_caption);
-    ncm.lfMenuFont.lfHeight = pt_to_height(sizes.menu);
-    ncm.lfStatusFont.lfHeight = pt_to_height(sizes.status);
-    ncm.lfMessageFont.lfHeight = pt_to_height(sizes.message);
+    ncm.lfCaptionFont.lfHeight = pt_to_height(sizes.caption.clamp(6, 24));
+    ncm.lfSmCaptionFont.lfHeight = pt_to_height(sizes.sm_caption.clamp(6, 24));
+    ncm.lfMenuFont.lfHeight = pt_to_height(sizes.menu.clamp(6, 24));
+    ncm.lfStatusFont.lfHeight = pt_to_height(sizes.status.clamp(6, 24));
+    ncm.lfMessageFont.lfHeight = pt_to_height(sizes.message.clamp(6, 24));
 
     unsafe {
         SystemParametersInfoW(
@@ -94,7 +94,7 @@ pub fn apply_system_metrics(sizes: &SystemFontSizes) -> anyhow::Result<()> {
         )?;
     }
 
-    lf_icon.lfHeight = pt_to_height(sizes.icon);
+    lf_icon.lfHeight = pt_to_height(sizes.icon.clamp(6, 24));
 
     unsafe {
         SystemParametersInfoW(
@@ -109,6 +109,7 @@ pub fn apply_system_metrics(sizes: &SystemFontSizes) -> anyhow::Result<()> {
 }
 
 pub fn apply_entire_size(pt: i32) -> anyhow::Result<SystemFontSizes> {
+    let pt = pt.clamp(6, 24);
     let sizes = SystemFontSizes {
         caption: pt,
         sm_caption: pt,

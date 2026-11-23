@@ -19,8 +19,6 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTC_WRAPPER: sccache
-  SCCACHE_GHA_ENABLED: "true"
 
 jobs:
   check:
@@ -36,16 +34,10 @@ jobs:
         with:
           components: clippy
 
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.11
-        with:
-          version: "v0.9.1"
-
-      - name: Cache Cargo registry & git
+      - name: Cache Cargo dependencies & target
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: "check-registry"
-          cache-directories: ""
+          shared-key: "check"
           cache-on-failure: true
 
       - name: Run unit tests
@@ -53,11 +45,6 @@ jobs:
 
       - name: Run Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
-
-      - name: Show sccache stats
-        if: always()
-        shell: bash
-        run: sccache --show-stats
 
   release:
     name: Build & Package Release (Windows x64)
@@ -72,16 +59,10 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.11
-        with:
-          version: "v0.9.1"
-
-      - name: Cache Cargo registry & git
+      - name: Cache Cargo dependencies & target
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: "release-registry"
-          cache-directories: ""
+          shared-key: "release"
           cache-on-failure: true
 
       - name: Build release binary
@@ -115,8 +96,3 @@ jobs:
             segoeui-changer-windows-x64.zip
             segoeui-changer-windows-x64.zip.sha256
           generate_release_notes: true
-
-      - name: Show sccache stats
-        if: always()
-        shell: bash
-        run: sccache --show-stats

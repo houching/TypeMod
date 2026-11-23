@@ -214,8 +214,7 @@ impl PersistedConfig {
     }
 
     pub fn script_font(&self, script: SecondaryScript) -> Option<&FontFamilySelection> {
-        let primary = self.active_scripts().into_iter().next().unwrap_or(SecondaryScript::Khmer);
-        if script == primary {
+        if script == SecondaryScript::Khmer {
             Some(&self.khmer)
         } else {
             self.extra_script_fonts.get(&script)
@@ -223,8 +222,7 @@ impl PersistedConfig {
     }
 
     pub fn script_font_mut(&mut self, script: SecondaryScript) -> &mut FontFamilySelection {
-        let primary = self.active_scripts().into_iter().next().unwrap_or(SecondaryScript::Khmer);
-        if script == primary {
+        if script == SecondaryScript::Khmer {
             &mut self.khmer
         } else {
             self.extra_script_fonts.entry(script).or_default()
@@ -232,8 +230,7 @@ impl PersistedConfig {
     }
 
     pub fn script_italic_font(&self, script: SecondaryScript) -> Option<&FontFamilySelection> {
-        let primary = self.active_scripts().into_iter().next().unwrap_or(SecondaryScript::Khmer);
-        if script == primary {
+        if script == SecondaryScript::Khmer {
             Some(&self.khmer_italic)
         } else {
             self.extra_script_italic_fonts.get(&script)
@@ -241,8 +238,7 @@ impl PersistedConfig {
     }
 
     pub fn script_italic_font_mut(&mut self, script: SecondaryScript) -> &mut FontFamilySelection {
-        let primary = self.active_scripts().into_iter().next().unwrap_or(SecondaryScript::Khmer);
-        if script == primary {
+        if script == SecondaryScript::Khmer {
             &mut self.khmer_italic
         } else {
             self.extra_script_italic_fonts.entry(script).or_default()
@@ -351,10 +347,19 @@ impl AppState {
     }
 
     pub fn app_docs_dir() -> PathBuf {
-        let home = std::env::var_os("USERPROFILE")
-            .map(PathBuf::from)
+        let exe = std::env::current_exe().ok();
+        let exe_dir = exe
+            .as_deref()
+            .and_then(|p| p.parent())
+            .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("."));
-        home.join("Documents").join("SegoeUIChanger")
+        let app_stem = exe
+            .as_deref()
+            .and_then(|p| p.file_stem())
+            .map(|s| s.to_string_lossy().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "segoeui-changer".to_string());
+        exe_dir.join(format!("{app_stem}_data"))
     }
 
     pub fn config_path() -> PathBuf {

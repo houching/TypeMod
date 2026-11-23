@@ -158,7 +158,6 @@ pub fn prompt_elevated_relaunch(
     window: &mut Window,
     cx: &mut App,
 ) {
-    let state_path_res = state.read(cx).save_temp_state();
     let state_clone = state.clone();
     confirm_modal.update(cx, |m, cx| {
         m.open(
@@ -168,16 +167,25 @@ pub fn prompt_elevated_relaunch(
                 confirm_label: "Relaunch Elevated".to_string(),
                 dangerous: false,
                 on_confirm: Box::new(move |_, cx| {
-                    if let Ok(state_path) = state_path_res {
-                        match relaunch_elevated(&state_path) {
+                    match state_clone.read(cx).save_temp_state() {
+                        Ok(state_path) => match relaunch_elevated(&state_path) {
                             Ok(true) => std::process::exit(0),
-                            Ok(false) => {}
+                            Ok(false) => {
+                                let _ = std::fs::remove_file(&state_path);
+                            }
                             Err(e) => {
+                                let _ = std::fs::remove_file(&state_path);
                                 state_clone.update(cx, |s, cx| {
                                     s.last_error = Some(format!("Elevation failed: {e}"));
                                     cx.notify();
                                 });
                             }
+                        },
+                        Err(e) => {
+                            state_clone.update(cx, |s, cx| {
+                                s.last_error = Some(format!("Failed to save temporary state: {e}"));
+                                cx.notify();
+                            });
                         }
                     }
                 }),

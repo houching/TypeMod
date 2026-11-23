@@ -128,21 +128,22 @@ def _extract_segoe_info(segoe_font):
 
 def _apply_segoe_metadata(final_font, info):
     """Applies Windows system font identity and vertical metrics to final_font."""
+    scale = (final_font.em / float(info["em"])) if info.get("em") else 1.0
     final_font.fontname = info["fontname"]
     final_font.familyname = info["familyname"]
     final_font.fullname = info["fullname"]
     final_font.sfnt_names = info["sfnt_names"]
     final_font.os2_weight = info["os2_weight"]
     final_font.os2_stylemap = info["os2_stylemap"]
-    final_font.ascent = info["ascent"]
-    final_font.descent = info["descent"]
-    final_font.hhea_ascent = info["hhea_ascent"]
-    final_font.hhea_descent = info["hhea_descent"]
-    final_font.hhea_linegap = info["hhea_linegap"]
-    final_font.os2_typoascent = info["os2_typoascent"]
-    final_font.os2_typodescent = info["os2_typodescent"]
-    final_font.os2_winascent = info["os2_winascent"]
-    final_font.os2_windescent = info["os2_windescent"]
+    final_font.ascent = int(round(info["ascent"] * scale))
+    final_font.descent = int(round(info["descent"] * scale))
+    final_font.hhea_ascent = int(round(info["hhea_ascent"] * scale))
+    final_font.hhea_descent = int(round(info["hhea_descent"] * scale))
+    final_font.hhea_linegap = int(round(info["hhea_linegap"] * scale))
+    final_font.os2_typoascent = int(round(info["os2_typoascent"] * scale))
+    final_font.os2_typodescent = int(round(info["os2_typodescent"] * scale))
+    final_font.os2_winascent = int(round(info["os2_winascent"] * scale))
+    final_font.os2_windescent = int(round(info["os2_windescent"] * scale))
     final_font.macstyle = info["macstyle"]
 
 
@@ -282,7 +283,8 @@ def _prepare_source_font(
 
 def _prepare_segoe_fallback(segoe_font, is_latin_only):
     """Clears replaced ranges from the already-open Segoe UI font in memory."""
-    segoe_font.selection.select(("ranges",), 0x0020, 0x007E)
+    segoe_font.selection.select(("ranges",), 0x0020, 0x024F)
+    segoe_font.selection.select(("more", "ranges"), 0x1E00, 0x1EFF)
     segoe_font.selection.select(("more", "ranges"), 0x0600, 0x06FF)
     segoe_font.selection.select(("more", "ranges"), 0xFB50, 0xFDFF)
     segoe_font.selection.select(("more", "ranges"), 0xFE70, 0xFEFF)
@@ -387,15 +389,13 @@ def process_weight(latin_path, arabic_path, weight_type, segoe_filename, mode="v
         _apply_segoe_metadata(final_font, segoe_info)
 
         output_name = os.path.join(base_dir, f"{segoe_filename.split('.')[0]}_system_mod.ttf")
-        try:
-            final_font.generate(output_name)
-        except Exception as e:
-            print(f"  -> Error generating final font: {e}")
-            final_font.save(output_name)
+        final_font.generate(output_name)
 
         print(f"  -> Success! Saved as: {os.path.basename(output_name)}")
+        return True
     except Exception as e:
-        print(f"  -> Unexpected error processing {weight_type}: {e}")
+        print(f"  -> Unexpected error processing {weight_type}: {e}", file=sys.stderr)
+        return False
     finally:
         # Run GC before closing fonts so FontForge Glyph wrappers don't finalize after font.close()
         gc.collect()
@@ -422,7 +422,8 @@ if __name__ == "__main__":
     argv = sys.argv[1:]
     if len(argv) >= 6 and argv[0] == "--single":
         # --single <weight_name> <lat_path> <ara_path> <segoe_filename> <mode>
-        process_weight(argv[2], argv[3], argv[1], argv[4], mode=argv[5].lower())
+        ok = process_weight(argv[2], argv[3], argv[1], argv[4], mode=argv[5].lower())
+        sys.exit(0 if ok else 1)
     elif len(argv) >= 12:
         run_batch(argv)
     else:

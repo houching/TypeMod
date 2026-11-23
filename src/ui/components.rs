@@ -356,6 +356,7 @@ impl RenderOnce for ToggleSwitch {
 
 pub fn vertical_scrollbar(
     handle: &gpui::ScrollHandle,
+    id: impl Into<gpui::ElementId>,
     theme: VantageTheme,
 ) -> gpui::AnyElement {
     let max_y: f32 = handle.max_offset().height.into();
@@ -372,7 +373,7 @@ pub fn vertical_scrollbar(
     let handle_clone = handle.clone();
 
     div()
-        .id("v-scrollbar-track")
+        .id(id)
         .absolute()
         .top(px(4.0))
         .bottom(px(4.0))

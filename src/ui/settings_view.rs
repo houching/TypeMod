@@ -11,7 +11,7 @@ use crate::domain::backup_cloner::{
     backup_dir, backup_status, ensure_backup, export_mod_package, import_and_apply_package,
 };
 use crate::domain::builder::{find_fontforge, install_fontforge_via_winget};
-use crate::domain::registry::check_system_state;
+use crate::domain::registry::{are_clones_installed, check_system_state};
 use crate::ui::components::{BadgeTone, ButtonVariant, StatusPill, ToggleSwitch, VantageButton};
 use crate::ui::confirm_modal::{ConfirmModal, prompt_elevated_relaunch};
 use crate::ui::theme::ThemeMode;
@@ -22,6 +22,7 @@ pub struct SettingsView {
     dpi_track_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     is_dragging_dpi: bool,
     cached_backup: (usize, usize),
+    last_busy: bool,
     scroll_handle: gpui::ScrollHandle,
 }
 
@@ -33,6 +34,7 @@ impl SettingsView {
             dpi_track_bounds: Rc::new(Cell::new(None)),
             is_dragging_dpi: false,
             cached_backup: backup_status(),
+            last_busy: false,
             scroll_handle: gpui::ScrollHandle::new(),
         }
     }
@@ -112,6 +114,9 @@ impl SettingsView {
     }
 
     fn package_zip_now(&self, cx: &mut Context<Self>) {
+        if self.state.read(cx).is_busy {
+            return;
+        }
         let (lat, khm) = {
             let cfg = &self.state.read(cx).config;
             (
@@ -119,12 +124,28 @@ impl SettingsView {
                 cfg.khmer.display_name.clone(),
             )
         };
+        self.state.update(cx, |s, cx| {
+            s.is_busy = true;
+            s.last_error = None;
+            cx.notify();
+        });
         cx.spawn(async move |this, cx| {
-            let Some(dest_zip) = rfd::FileDialog::new()
-                .add_filter("SegoeUI Mod Package", &["zip"])
-                .set_file_name("segoeui-mod-pack.zip")
-                .save_file()
+            let Some(dest_zip) = cx
+                .background_executor()
+                .spawn(async move {
+                    rfd::FileDialog::new()
+                        .add_filter("SegoeUI Mod Package", &["zip"])
+                        .set_file_name("segoeui-mod-pack.zip")
+                        .save_file()
+                })
+                .await
             else {
+                let _ = this.update(cx, |view, cx| {
+                    view.state.update(cx, |s, cx| {
+                        s.is_busy = false;
+                        cx.notify();
+                    });
+                });
                 return;
             };
             let result = cx
@@ -137,6 +158,7 @@ impl SettingsView {
             let _ = this.update(cx, |view, cx| match result {
                 Ok((count, dest_zip)) => {
                     view.state.update(cx, |s, cx| {
+                        s.is_busy = false;
                         s.last_error = None;
                         s.last_notice = Some(format!(
                             "Packaged {count} modded fonts into {}.",
@@ -147,6 +169,7 @@ impl SettingsView {
                 }
                 Err(e) => {
                     view.state.update(cx, |s, cx| {
+                        s.is_busy = false;
                         s.last_error = Some(format!("Package failed: {e}"));
                         cx.notify();
                     });
@@ -158,6 +181,9 @@ impl SettingsView {
 
     fn import_zip_now(&self, window: &mut Window, cx: &mut Context<Self>) {
         let s = self.state.read(cx);
+        if s.is_busy {
+            return;
+        }
         if !s.is_admin {
             prompt_elevated_relaunch(
                 self.state.clone(),
@@ -168,11 +194,27 @@ impl SettingsView {
             );
             return;
         }
+        self.state.update(cx, |s, cx| {
+            s.is_busy = true;
+            s.last_error = None;
+            cx.notify();
+        });
         cx.spawn(async move |this, cx| {
-            let Some(src_zip) = rfd::FileDialog::new()
-                .add_filter("SegoeUI Mod Package", &["zip"])
-                .pick_file()
+            let Some(src_zip) = cx
+                .background_executor()
+                .spawn(async move {
+                    rfd::FileDialog::new()
+                        .add_filter("SegoeUI Mod Package", &["zip"])
+                        .pick_file()
+                })
+                .await
             else {
+                let _ = this.update(cx, |view, cx| {
+                    view.state.update(cx, |s, cx| {
+                        s.is_busy = false;
+                        cx.notify();
+                    });
+                });
                 return;
             };
             let result = cx
@@ -183,8 +225,11 @@ impl SettingsView {
                 .await;
             let _ = this.update(cx, |view, cx| match result {
                 Ok((count, src_zip)) => {
+                    view.cached_backup = backup_status();
                     view.state.update(cx, |s, cx| {
+                        s.is_busy = false;
                         s.system_state = check_system_state();
+                        s.clones_installed = are_clones_installed();
                         s.last_error = None;
                         s.last_notice = Some(format!(
                             "Imported & applied {count} fonts from {}. REBOOT REQUIRED to apply system-wide.",
@@ -195,6 +240,7 @@ impl SettingsView {
                 }
                 Err(e) => {
                     view.state.update(cx, |s, cx| {
+                        s.is_busy = false;
                         s.last_error = Some(format!("Import failed: {e}"));
                         cx.notify();
                     });
@@ -252,6 +298,10 @@ impl Render for SettingsView {
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|| "Not detected".to_string());
         let ff_ok = s.fontforge_path.is_some();
+        if self.last_busy && !s.is_busy {
+            self.cached_backup = backup_status();
+        }
+        self.last_busy = s.is_busy;
         let (bak_have, bak_total) = self.cached_backup;
 
         let toggles: [(&'static str, &'static str, &'static str, bool); 5] = [
@@ -270,13 +320,13 @@ impl Render for SettingsView {
             (
                 "save_log",
                 "Save Build Log",
-                "Write FontForge output to Documents\\SegoeUIChanger\\SegoeUIChanger_Build_Log.txt.",
+                "Write FontForge output to <app>_data\\SegoeUIChanger_Build_Log.txt.",
                 cfg.save_log,
             ),
             (
                 "save_fonts",
                 "Export Generated Fonts",
-                "Copy built *_system_mod.ttf files to Documents\\SegoeUIChanger\\Outputs.",
+                "Copy built *_system_mod.ttf files to <app>_data\\Outputs.",
                 cfg.save_fonts,
             ),
             (
@@ -295,6 +345,20 @@ impl Render for SettingsView {
             .flex()
             .flex_col()
             .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify()))
+            .on_mouse_move(cx.listener(|this, ev: &gpui::MouseMoveEvent, _, cx| {
+                if this.is_dragging_dpi && ev.pressed_button == Some(MouseButton::Left) {
+                    this.update_dpi_from_pos(ev.position, false, cx);
+                }
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, ev: &gpui::MouseUpEvent, _, cx| {
+                    if this.is_dragging_dpi {
+                        this.is_dragging_dpi = false;
+                        this.update_dpi_from_pos(ev.position, true, cx);
+                    }
+                }),
+            )
             .child(
                 div()
                     .id("settings-scroll")
@@ -766,18 +830,43 @@ impl Render for SettingsView {
                                     .icon("icons/folder-open.svg")
                                     .on_click(cx.listener(|_, _, _, cx| {
                                         cx.spawn(async move |this, cx| {
-                                            let Some(path) = rfd::FileDialog::new()
-                                                .add_filter("FontForge Python", &["exe"])
-                                                .pick_file()
+                                            let Some(path) = cx
+                                                .background_executor()
+                                                .spawn(async move {
+                                                    rfd::FileDialog::new()
+                                                        .add_filter("FontForge Python", &["exe"])
+                                                        .pick_file()
+                                                })
+                                                .await
                                             else {
                                                 return;
                                             };
+                                            let path_check = path.clone();
+                                            let is_valid = cx
+                                                .background_executor()
+                                                .spawn(async move {
+                                                    use std::os::windows::process::CommandExt;
+                                                    std::process::Command::new(&path_check)
+                                                        .args(["-c", "import fontforge"])
+                                                        .creation_flags(0x0800_0000)
+                                                        .output()
+                                                        .is_ok_and(|o| o.status.success())
+                                                })
+                                                .await;
                                             let _ = this.update(cx, |view, cx| {
                                                 view.state.update(cx, |s, cx| {
-                                                    s.config.custom_fontforge_path =
-                                                        Some(path.clone());
-                                                    s.fontforge_path = Some(path);
-                                                    let _ = s.save_config();
+                                                    if is_valid {
+                                                        s.config.custom_fontforge_path =
+                                                            Some(path.clone());
+                                                        s.fontforge_path = Some(path);
+                                                        s.last_error = None;
+                                                        let _ = s.save_config();
+                                                    } else {
+                                                        s.last_error = Some(format!(
+                                                            "Selected executable is not a valid ffpython.exe (missing fontforge module): {}",
+                                                            path.display()
+                                                        ));
+                                                    }
                                                     cx.notify();
                                                 });
                                             });
@@ -811,6 +900,10 @@ impl Render for SettingsView {
                     ),
             )
             )
-            .child(crate::ui::components::vertical_scrollbar(&self.scroll_handle, theme))
+            .child(crate::ui::components::vertical_scrollbar(
+                &self.scroll_handle,
+                "settings-scroll-bar",
+                theme,
+            ))
     }
 }

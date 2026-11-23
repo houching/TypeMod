@@ -2,7 +2,7 @@ use std::fs;
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-use windows::Win32::Foundation::ERROR_NO_MORE_ITEMS;
+use windows::Win32::Foundation::{ERROR_MORE_DATA, ERROR_NO_MORE_ITEMS};
 use windows::Win32::System::Registry::{
     HKEY, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WRITE, REG_SZ, REG_VALUE_TYPE, RegCloseKey,
     RegDeleteValueW, RegEnumValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
@@ -212,6 +212,11 @@ pub fn list_installed_fonts() -> Vec<(String, PathBuf)> {
             if err == ERROR_NO_MORE_ITEMS {
                 break;
             }
+            if err == ERROR_MORE_DATA && name_buf.len() < 8192 && data_buf.len() < 16384 {
+                name_buf.resize(name_buf.len() * 2, 0);
+                data_buf.resize(data_buf.len() * 2, 0);
+                continue;
+            }
             idx += 1;
 
             if err.is_err() || val_type != REG_SZ.0 {
@@ -238,7 +243,7 @@ pub fn list_installed_fonts() -> Vec<(String, PathBuf)> {
             let is_outline = path
                 .extension()
                 .and_then(|e| e.to_str())
-                .is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "ttf" | "otf" | "ttc"));
+                .is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "ttf" | "otf"));
 
             if is_outline && path.exists() {
                 let clean_name = clean_registry_font_name(&raw_name);
@@ -278,7 +283,7 @@ pub fn query_font_value(value_name: &str) -> Option<String> {
     let mut data_len = data_buf.len() as u32;
     let mut val_type = REG_VALUE_TYPE::default();
 
-    let err = unsafe {
+    let mut err = unsafe {
         RegQueryValueExW(
             hkey,
             PCWSTR(wide_name.as_ptr()),
@@ -288,6 +293,19 @@ pub fn query_font_value(value_name: &str) -> Option<String> {
             Some(&mut data_len),
         )
     };
+    if err == ERROR_MORE_DATA && (data_len as usize) > data_buf.len() && data_len <= 16384 {
+        data_buf.resize(data_len as usize, 0);
+        err = unsafe {
+            RegQueryValueExW(
+                hkey,
+                PCWSTR(wide_name.as_ptr()),
+                None,
+                Some(&mut val_type),
+                Some(data_buf.as_mut_ptr()),
+                Some(&mut data_len),
+            )
+        };
+    }
 
     unsafe {
         let _ = RegCloseKey(hkey);
@@ -308,25 +326,43 @@ pub fn query_font_value(value_name: &str) -> Option<String> {
 }
 
 pub fn check_system_state() -> SystemFontState {
-    let is_mod = ["Segoe UI (TrueType)", "Segoe UI Variable (TrueType)"]
-        .into_iter()
-        .any(|k| {
-            query_font_value(k)
-                .is_some_and(|v| v.to_ascii_lowercase().contains("system_mod"))
-        });
+    let is_mod = SEGOE_FONT_SPECS.iter().any(|spec| {
+        query_font_value(spec.reg_key)
+            .is_some_and(|v| v.to_ascii_lowercase().contains("system_mod"))
+    });
 
     if is_mod {
         return SystemFontState::Modded;
     }
 
     if !crate::domain::elevation::is_admin() {
-        return SystemFontState::Original;
+        return if has_unreferenced_mod_files() {
+            SystemFontState::PendingRestoreReboot
+        } else {
+            SystemFontState::Original
+        };
     }
     if cleanup_stale_mod_files() {
         SystemFontState::Original
     } else {
         SystemFontState::PendingRestoreReboot
     }
+}
+
+fn has_unreferenced_mod_files() -> bool {
+    let active: std::collections::HashSet<String> = SEGOE_FONT_SPECS
+        .iter()
+        .filter_map(|s| query_font_value(s.reg_key))
+        .map(|v| v.to_ascii_lowercase())
+        .collect();
+
+    let Ok(entries) = fs::read_dir(windows_fonts_dir()) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+        name.contains("_system_mod") && name.ends_with(".ttf") && !active.contains(&name)
+    })
 }
 
 /// Removes leftover `*_system_mod*.ttf` files from `%WINDIR%\Fonts` that are not
@@ -513,7 +549,12 @@ if (-not (Get-Process -Name explorer -ErrorAction SilentlyContinue)) { Start-Pro
         .creation_flags(CREATE_NO_WINDOW)
         .status();
 
-    let _ = crate::domain::resizer::set_system_font_face("Segoe UI");
+    let face = if is_modded || !fonts_dir.join("SegUIVar.ttf").exists() {
+        "Segoe UI"
+    } else {
+        "Segoe UI Variable Text"
+    };
+    let _ = crate::domain::resizer::set_system_font_face(face);
 
     unsafe {
         let mut res = 0usize;

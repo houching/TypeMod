@@ -104,42 +104,52 @@ impl PreviewView {
             return;
         }
         self.last_candidates = raw_candidates.clone();
+        self.selected_family = None;
 
-        let candidates: Vec<PathBuf> = raw_candidates.into_iter().filter(|p| p.exists()).collect();
+        let to_load: Vec<PathBuf> = raw_candidates
+            .into_iter()
+            .filter(|p| !self.loaded_paths.contains(p))
+            .collect();
+        let all_candidates = self.last_candidates.clone();
 
-        if candidates.is_empty() {
-            self.selected_family = None;
-            return;
-        }
+        cx.spawn(async move |this, cx| {
+            let (blobs, loaded, first_family) = cx
+                .background_executor()
+                .spawn(async move {
+                    let mut new_blobs: Vec<Cow<'static, [u8]>> = Vec::new();
+                    let mut loaded = Vec::new();
+                    for path in &to_load {
+                        if let Ok(bytes) = fs::read(path) {
+                            new_blobs.push(Cow::Owned(bytes));
+                            loaded.push(path.clone());
+                        }
+                    }
+                    let first_family = all_candidates
+                        .iter()
+                        .find_map(|p| fs::read(p).ok().and_then(|b| extract_family_name(&b)));
+                    (new_blobs, loaded, first_family)
+                })
+                .await;
 
-        let mut new_blobs: Vec<Cow<'static, [u8]>> = Vec::new();
-        for path in &candidates {
-            if !self.loaded_paths.contains(path)
-                && let Ok(bytes) = fs::read(path)
-            {
-                if self.selected_family.is_none()
-                    && let Some(fam) = extract_family_name(&bytes)
-                {
-                    self.selected_family = Some(fam.into());
+            let _ = this.update(cx, |view, cx| {
+                for p in loaded {
+                    view.loaded_paths.insert(p);
                 }
-                new_blobs.push(Cow::Owned(bytes));
-                self.loaded_paths.insert(path.clone());
-            }
-        }
-
-        if self.selected_family.is_none()
-            && let Some(first) = candidates.first()
-            && let Ok(bytes) = fs::read(first)
-        {
-            self.selected_family = extract_family_name(&bytes).map(Into::into);
-        }
-
-        if !new_blobs.is_empty() {
-            match cx.text_system().add_fonts(new_blobs) {
-                Ok(()) => self.load_error = None,
-                Err(e) => self.load_error = Some(format!("Failed to load font into preview: {e}")),
-            }
-        }
+                if view.selected_family.is_none() {
+                    view.selected_family = first_family.map(Into::into);
+                }
+                if !blobs.is_empty() {
+                    match cx.text_system().add_fonts(blobs) {
+                        Ok(()) => view.load_error = None,
+                        Err(e) => {
+                            view.load_error = Some(format!("Failed to load font into preview: {e}"))
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
@@ -186,6 +196,10 @@ impl Render for PreviewView {
         let s = self.state.read(cx);
         let theme = s.theme();
         let is_focused = self.input.focus_handle.is_focused(window);
+        if !is_focused && self.input._blink_task.is_some() {
+            self.input.cursor_visible = true;
+            self.input._blink_task = None;
+        }
         let has_selected = s.config.latin.has_regular();
         let active_family: SharedString = match self.source {
             PreviewSource::SelectedFonts => self
@@ -480,6 +494,10 @@ impl Render for PreviewView {
                     })),
             )
             )
-            .child(crate::ui::components::vertical_scrollbar(&self.scroll_handle, theme))
+            .child(crate::ui::components::vertical_scrollbar(
+                &self.scroll_handle,
+                "preview-scroll-bar",
+                theme,
+            ))
     }
 }

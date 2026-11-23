@@ -9,11 +9,7 @@ use crate::domain::registry::{
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 pub fn backup_dir() -> PathBuf {
-    std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(Path::to_path_buf))
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("Original_Segoe_Backups")
+    crate::app_state::AppState::app_docs_dir().join("Original_Segoe_Backups")
 }
 
 /// Backs up stock Segoe UI files once into `Original_Segoe_Backups/`.
@@ -151,16 +147,31 @@ pub fn import_and_apply_package(src_zip: &Path) -> anyhow::Result<usize> {
     let _ = ensure_backup()?;
 
     let fonts_dir = windows_fonts_dir();
-    let tag = std::time::SystemTime::now()
+    let ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
+        .map(|d| d.as_millis())
         .unwrap_or(1);
+    let tag = format!("{ms}_{}", std::process::id());
     let mut reg_updates: Vec<(&str, String)> = Vec::new();
+    let mut copied_paths: Vec<PathBuf> = Vec::new();
     for spec in SEGOE_FONT_SPECS {
         let src = import_dir.join(spec.mod_file);
         if fs::symlink_metadata(&src).is_ok_and(|m| m.file_type().is_file()) {
+            let bytes = fs::read(&src)?;
+            if write_fonts::read::FontRef::new(&bytes).is_err() {
+                let _ = fs::remove_dir_all(&import_dir);
+                anyhow::bail!("Invalid font file in package: {}", spec.mod_file);
+            }
             let tagged = spec.mod_file.replace(".ttf", &format!("_{tag}.ttf"));
-            fs::copy(&src, fonts_dir.join(&tagged))?;
+            let dst = fonts_dir.join(&tagged);
+            if let Err(e) = fs::copy(&src, &dst) {
+                for p in &copied_paths {
+                    let _ = fs::remove_file(p);
+                }
+                let _ = fs::remove_dir_all(&import_dir);
+                return Err(e.into());
+            }
+            copied_paths.push(dst);
             reg_updates.push((spec.reg_key, tagged));
         }
     }
@@ -169,7 +180,13 @@ pub fn import_and_apply_package(src_zip: &Path) -> anyhow::Result<usize> {
         .iter()
         .map(|(k, v)| (*k, v.as_str()))
         .collect();
-    set_font_registry_entries(&reg_refs)?;
+    if let Err(e) = set_font_registry_entries(&reg_refs) {
+        for p in &copied_paths {
+            let _ = fs::remove_file(p);
+        }
+        let _ = fs::remove_dir_all(&import_dir);
+        return Err(e);
+    }
     let _ = crate::domain::resizer::set_system_font_face("Segoe UI");
     let _ = cleanup_stale_mod_files();
     let _ = fs::remove_dir_all(&import_dir);

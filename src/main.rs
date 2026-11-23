@@ -42,7 +42,13 @@ fn run_cli_build(state_arg: Option<PathBuf>) -> anyhow::Result<()> {
     if sys_state != SystemFontState::Original {
         anyhow::bail!("System state is {:?}; restore and reboot first", sys_state);
     }
-    let ff_exe = find_fontforge().ok_or_else(|| anyhow::anyhow!("FontForge ffpython.exe not found"))?;
+    let ff_exe = state
+        .config
+        .custom_fontforge_path
+        .clone()
+        .filter(|p| p.exists())
+        .or_else(find_fontforge)
+        .ok_or_else(|| anyhow::anyhow!("FontForge ffpython.exe not found"))?;
     let cancel = AtomicBool::new(false);
     run_build_and_apply(&state.config, &ff_exe, &cancel, |ev| match ev {
         BuildProgressEvent::Step { progress, status } => {
@@ -67,6 +73,14 @@ fn main() {
         .run(move |cx: &mut App| {
         let state = cx.new(|_| {
             let mut s = AppState::new(state_arg.as_deref());
+            if let Some(ref temp_path) = state_arg
+                && temp_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("temp_state_"))
+            {
+                let _ = std::fs::remove_file(temp_path);
+            }
             s.is_admin = is_admin();
             s.system_state = check_system_state();
             s.clones_installed = are_clones_installed();
