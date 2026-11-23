@@ -9,6 +9,7 @@ use crate::ui::components::{ButtonVariant, VantageButton};
 pub struct LogDrawer {
     state: Entity<AppState>,
     copied: bool,
+    scroll_handle: gpui::ScrollHandle,
 }
 
 impl LogDrawer {
@@ -16,6 +17,7 @@ impl LogDrawer {
         Self {
             state,
             copied: false,
+            scroll_handle: gpui::ScrollHandle::new(),
         }
     }
 }
@@ -108,38 +110,49 @@ impl Render for LogDrawer {
             )
             .child(
                 div()
-                    .id("log-scroll")
+                    .relative()
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scroll()
-                    .bg(theme.bg)
-                    .border_1()
-                    .border_color(theme.line)
-                    .rounded(px(6.0))
-                    .p(px(8.0))
                     .flex()
                     .flex_col()
-                    .gap(px(2.0))
-                    .children(if lines.is_empty() {
-                        vec![
-                            div()
-                                .text_xs()
-                                .text_color(theme.text_3)
-                                .child("No build output yet.")
-                                .into_any_element(),
-                        ]
-                    } else {
-                        lines
-                            .into_iter()
-                            .map(|line| {
-                                div()
-                                    .text_xs()
-                                    .text_color(theme.text_2)
-                                    .child(line)
-                                    .into_any_element()
-                            })
-                            .collect()
-                    }),
+                    .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify()))
+                    .child(
+                        div()
+                            .id("log-scroll")
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.scroll_handle)
+                            .bg(theme.bg)
+                            .border_1()
+                            .border_color(theme.line)
+                            .rounded(px(6.0))
+                            .p(px(8.0))
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.0))
+                            .children(if lines.is_empty() {
+                                vec![
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme.text_3)
+                                        .child("No build output yet.")
+                                        .into_any_element(),
+                                ]
+                            } else {
+                                lines
+                                    .into_iter()
+                                    .map(|line| {
+                                        div()
+                                            .text_xs()
+                                            .text_color(theme.text_2)
+                                            .child(line)
+                                            .into_any_element()
+                                    })
+                                    .collect()
+                            }),
+                    )
+                    .child(crate::ui::components::vertical_scrollbar(&self.scroll_handle, theme)),
             )
             .into_any_element()
     }

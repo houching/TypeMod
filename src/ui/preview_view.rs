@@ -1,18 +1,18 @@
 use std::borrow::Cow;
 use std::collections::HashSet;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    Context, Entity, FocusHandle, FontWeight, InteractiveElement, IntoElement, KeyDownEvent,
-    MouseButton, ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Window,
-    div, px,
+    Context, Entity, FontWeight, InteractiveElement, IntoElement, KeyDownEvent, ParentElement,
+    Render, SharedString, StatefulInteractiveElement, Styled, Window, div, px,
 };
 use read_fonts::{FontRef, TableProvider, types::NameId};
 
 use crate::app_state::AppState;
 use crate::ui::components::{BadgeTone, ButtonVariant, StatusPill, VantageButton};
+use crate::ui::text_input::{TextBoxProps, TextFieldState};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PreviewSource {
@@ -23,15 +23,13 @@ enum PreviewSource {
 pub struct PreviewView {
     state: Entity<AppState>,
     source: PreviewSource,
-    sample_text: String,
     font_size_px: f32,
-    focus_handle: FocusHandle,
-    cursor_visible: bool,
-    _blink_task: Option<gpui::Task<()>>,
+    input: TextFieldState,
     loaded_paths: HashSet<PathBuf>,
     last_candidates: Vec<PathBuf>,
     selected_family: Option<SharedString>,
     load_error: Option<String>,
+    scroll_handle: gpui::ScrollHandle,
 }
 
 impl PreviewView {
@@ -39,24 +37,25 @@ impl PreviewView {
         Self {
             state,
             source: PreviewSource::SelectedFonts,
-            sample_text: "សួស្តីកម្ពុជា — ភាសាខ្មែរ និង English UI 0123456789".to_string(),
             font_size_px: 18.0,
-            focus_handle: cx.focus_handle(),
-            cursor_visible: true,
-            _blink_task: None,
+            input: TextFieldState::new(
+                "សួស្តីកម្ពុជា — ភាសាខ្មែរ និង English UI 0123456789",
+                cx.focus_handle(),
+            ),
             loaded_paths: HashSet::new(),
             last_candidates: Vec::new(),
             selected_family: None,
             load_error: None,
+            scroll_handle: gpui::ScrollHandle::new(),
         }
     }
 
     fn start_blink(&mut self, cx: &mut Context<Self>) {
-        self.cursor_visible = true;
-        if self._blink_task.is_some() {
+        self.input.cursor_visible = true;
+        if self.input._blink_task.is_some() {
             return;
         }
-        self._blink_task = Some(cx.spawn(async move |this, cx| {
+        self.input._blink_task = Some(cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor()
                     .timer(std::time::Duration::from_millis(530))
@@ -64,11 +63,11 @@ impl PreviewView {
                 let keep_going = this
                     .update(cx, |view, cx| {
                         if view.state.read(cx).active_tab != crate::app_state::NavTab::Preview {
-                            view.cursor_visible = true;
-                            view._blink_task = None;
+                            view.input.cursor_visible = true;
+                            view.input._blink_task = None;
                             return false;
                         }
-                        view.cursor_visible = !view.cursor_visible;
+                        view.input.cursor_visible = !view.input.cursor_visible;
                         cx.notify();
                         true
                     })
@@ -144,21 +143,8 @@ impl PreviewView {
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        match event.keystroke.key.as_str() {
-            "backspace" => {
-                self.sample_text.pop();
-                cx.notify();
-            }
-            _ => {
-                if let Some(ch) = &event.keystroke.key_char
-                    && !event.keystroke.modifiers.control
-                    && !event.keystroke.modifiers.alt
-                {
-                    self.cursor_visible = true;
-                    self.sample_text.push_str(ch);
-                    cx.notify();
-                }
-            }
+        if self.input.handle_key_down(event, cx) {
+            cx.notify();
         }
     }
 
@@ -199,7 +185,7 @@ impl Render for PreviewView {
 
         let s = self.state.read(cx);
         let theme = s.theme();
-        let is_focused = self.focus_handle.is_focused(window);
+        let is_focused = self.input.focus_handle.is_focused(window);
         let has_selected = s.config.latin.has_regular();
         let active_family: SharedString = match self.source {
             PreviewSource::SelectedFonts => self
@@ -233,22 +219,31 @@ impl Render for PreviewView {
         ];
 
         let size_px = self.font_size_px;
-        let sample = if self.sample_text.is_empty() {
+        let sample = if self.input.text.is_empty() {
             "Type custom text above to preview...".to_string()
         } else {
-            self.sample_text.clone()
+            self.input.text.clone()
         };
 
         div()
-            .id("preview-scroll")
+            .relative()
             .flex_1()
             .min_h_0()
-            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify()))
+            .child(
+                div()
+                    .id("preview-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.scroll_handle)
             .p(px(20.0))
             .flex()
             .flex_col()
             .gap(px(16.0))
-            .track_focus(&self.focus_handle)
+            .track_focus(&self.input.focus_handle)
             .on_key_down(cx.listener(Self::on_key_down))
             .child(
                 div()
@@ -346,58 +341,33 @@ impl Render for PreviewView {
                                         )
                                         .variant(ButtonVariant::Ghost)
                                         .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.sample_text = text.to_string();
+                                            this.input.set_text(text);
                                             cx.notify();
                                         }))
                                     })),
                             ),
                     )
                     .child(
-                        div()
-                            .id("preview-text-input")
-                            .min_h(px(40.0))
-                            .px(px(12.0))
-                            .py(px(8.0))
-                            .rounded(px(6.0))
-                            .bg(theme.surface_2)
-                            .border_1()
-                            .border_color(if is_focused { theme.accent } else { theme.line_2 })
-                            .cursor_text()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, _, window, cx| {
-                                    window.focus(&this.focus_handle);
-                                    this.start_blink(cx);
-                                    cx.notify();
-                                }),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .min_w_0()
-                                    .w_full()
-                                    .overflow_hidden()
-                                    .text_sm()
-                                    .text_color(if self.sample_text.is_empty() {
-                                        theme.text_3
-                                    } else {
-                                        theme.text
-                                    })
-                                    .child(sample.clone())
-                                    .when(is_focused && self.cursor_visible, |d| {
-                                        d.child(
-                                            div()
-                                                .w(px(1.5))
-                                                .h(px(15.0))
-                                                .ml(px(2.0))
-                                                .bg(theme.accent),
-                                        )
-                                    }),
-                            ),
+                        self.input.render_box(
+                            TextBoxProps {
+                                id: "preview-text-input".into(),
+                                clear_id: "preview-text-clear".into(),
+                                placeholder: "Type or paste custom text to preview...",
+                                leading_icon: None,
+                                trailing_badge: None,
+                                is_focused,
+                                theme,
+                            },
+                            cx.listener(|this, _, window, cx| {
+                                window.focus(&this.input.focus_handle);
+                                this.start_blink(cx);
+                                cx.notify();
+                            }),
+                            cx.listener(|this, _, _, cx| {
+                                this.input.clear();
+                                cx.notify();
+                            }),
+                        ),
                     )
                     .child(
                         div()
@@ -509,8 +479,7 @@ impl Render for PreviewView {
                             )
                     })),
             )
+            )
+            .child(crate::ui::components::vertical_scrollbar(&self.scroll_handle, theme))
     }
 }
-
-#[allow(dead_code)]
-fn _unused_path_ref(_p: &Path) {}

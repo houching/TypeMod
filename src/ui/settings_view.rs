@@ -11,25 +11,29 @@ use crate::domain::backup_cloner::{
     backup_dir, backup_status, ensure_backup, export_mod_package, import_and_apply_package,
 };
 use crate::domain::builder::{find_fontforge, install_fontforge_via_winget};
-use crate::domain::elevation::relaunch_elevated;
 use crate::domain::registry::check_system_state;
-use crate::ui::components::{BadgeTone, ButtonVariant, StatusPill, VantageButton};
+use crate::ui::components::{BadgeTone, ButtonVariant, StatusPill, ToggleSwitch, VantageButton};
+use crate::ui::confirm_modal::{ConfirmModal, prompt_elevated_relaunch};
 use crate::ui::theme::ThemeMode;
 
 pub struct SettingsView {
     state: Entity<AppState>,
+    confirm_modal: Entity<ConfirmModal>,
     dpi_track_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     is_dragging_dpi: bool,
     cached_backup: (usize, usize),
+    scroll_handle: gpui::ScrollHandle,
 }
 
 impl SettingsView {
-    pub fn new(state: Entity<AppState>) -> Self {
+    pub fn new(state: Entity<AppState>, confirm_modal: Entity<ConfirmModal>) -> Self {
         Self {
             state,
+            confirm_modal,
             dpi_track_bounds: Rc::new(Cell::new(None)),
             is_dragging_dpi: false,
             cached_backup: backup_status(),
+            scroll_handle: gpui::ScrollHandle::new(),
         }
     }
 
@@ -152,14 +156,16 @@ impl SettingsView {
         .detach();
     }
 
-    fn import_zip_now(&self, cx: &mut Context<Self>) {
+    fn import_zip_now(&self, window: &mut Window, cx: &mut Context<Self>) {
         let s = self.state.read(cx);
         if !s.is_admin {
-            if let Ok(state_path) = s.save_temp_state()
-                && let Ok(true) = relaunch_elevated(&state_path)
-            {
-                std::process::exit(0);
-            }
+            prompt_elevated_relaunch(
+                self.state.clone(),
+                &self.confirm_modal,
+                "Importing and applying system font packages requires Administrator privileges. Relaunch elevated now?",
+                window,
+                cx,
+            );
             return;
         }
         cx.spawn(async move |this, cx| {
@@ -282,11 +288,21 @@ impl Render for SettingsView {
         ];
 
         div()
-            .id("settings-scroll")
+            .relative()
             .flex_1()
             .min_h_0()
             .min_w_0()
-            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify()))
+            .child(
+                div()
+                    .id("settings-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .min_w_0()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.scroll_handle)
             .p(px(20.0))
             .flex()
             .flex_col()
@@ -560,17 +576,14 @@ impl Render for SettingsView {
                                     .child(div().text_xs().text_color(theme.text_3).child(desc)),
                             )
                             .child(
-                                VantageButton::new(
+                                ToggleSwitch::new(
                                     gpui::SharedString::from(format!("tog-{key}")),
-                                    if enabled { "Enabled" } else { "Disabled" },
+                                    enabled,
                                     theme,
                                 )
-                                    .variant(if enabled {
-                                        ButtonVariant::Primary
-                                    } else {
-                                        ButtonVariant::Secondary
-                                    })
-                                    .on_click(cx.listener(move |this, _, _, cx| this.toggle_bool(key, cx))),
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.toggle_bool(key, cx)
+                                })),
                             )
                     })),
             )
@@ -693,7 +706,9 @@ impl Render for SettingsView {
                                             .icon("icons/download.svg")
                                             .variant(ButtonVariant::Primary)
                                             .disabled(s.is_busy)
-                                            .on_click(cx.listener(|this, _, _, cx| this.import_zip_now(cx))),
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.import_zip_now(window, cx)
+                                            })),
                                     ),
                             ),
                     ),
@@ -795,5 +810,7 @@ impl Render for SettingsView {
                             ),
                     ),
             )
+            )
+            .child(crate::ui::components::vertical_scrollbar(&self.scroll_handle, theme))
     }
 }

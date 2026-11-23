@@ -1,19 +1,17 @@
 use std::path::PathBuf;
 
 use gpui::{
-    Context, Entity, IntoElement, ParentElement, Render, SharedString, Styled, Window, div,
-    prelude::*, px,
+    Context, Entity, IntoElement, KeyDownEvent, ParentElement, Render, SharedString, Styled, Window,
+    div, prelude::*, px,
 };
-use rfd::{FileDialog, MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
+use rfd::FileDialog;
 
-use crate::app_state::{AppState, FontFamilySelection, SecondaryScript};
+use crate::app_state::{AppState, FontFamilySelection, NavTab, SecondaryScript};
 use crate::domain::builder::{BuildProgressEvent, find_fontforge, run_build_and_apply};
-use crate::domain::elevation::relaunch_elevated;
 use crate::domain::font_discovery::auto_detect_weights;
-use crate::domain::registry::{
-    are_clones_installed, check_system_state, restore_original_fonts,
-};
+use crate::domain::registry::{are_clones_installed, check_system_state, restore_original_fonts};
 use crate::ui::components::{BadgeTone, ButtonVariant, StatusPill, VantageButton};
+use crate::ui::confirm_modal::{ConfirmModal, ConfirmRequest, prompt_elevated_relaunch};
 use crate::ui::font_picker_modal::{FontPickerModal, FontTargetSlot};
 
 #[derive(Clone, Copy)]
@@ -40,7 +38,9 @@ impl WeightKind {
 pub struct HomeView {
     state: Entity<AppState>,
     picker: Entity<FontPickerModal>,
+    confirm_modal: Entity<ConfirmModal>,
     script_dropdown_open: bool,
+    scroll_handle: gpui::ScrollHandle,
 }
 
 struct FontCardProps<'a> {
@@ -54,11 +54,17 @@ struct FontCardProps<'a> {
 }
 
 impl HomeView {
-    pub fn new(state: Entity<AppState>, picker: Entity<FontPickerModal>) -> Self {
+    pub fn new(
+        state: Entity<AppState>,
+        picker: Entity<FontPickerModal>,
+        confirm_modal: Entity<ConfirmModal>,
+    ) -> Self {
         Self {
             state,
             picker,
+            confirm_modal,
             script_dropdown_open: false,
+            scroll_handle: gpui::ScrollHandle::new(),
         }
     }
 
@@ -78,8 +84,7 @@ impl HomeView {
 
             let _ = this.update(cx, |view, cx| {
                 view.state.update(cx, |s, cx| {
-                    let target = slot_mut(&mut s.config, slot);
-                    *target = detected;
+                    *slot.select_mut(&mut s.config) = detected;
                     s.last_error = None;
                     let _ = s.save_config();
                     cx.notify();
@@ -100,7 +105,7 @@ impl HomeView {
 
             let _ = this.update(cx, |view, cx| {
                 view.state.update(cx, |s, cx| {
-                    let target = slot_mut(&mut s.config, slot);
+                    let target = slot.select_mut(&mut s.config);
                     match weight {
                         WeightKind::Light => target.light = Some(path),
                         WeightKind::Semilight => target.semilight = Some(path),
@@ -118,7 +123,7 @@ impl HomeView {
 
     fn clear_slot(&self, slot: FontTargetSlot, cx: &mut Context<Self>) {
         self.state.update(cx, |s, cx| {
-            slot_mut(&mut s.config, slot).clear();
+            slot.select_mut(&mut s.config).clear();
             let _ = s.save_config();
             cx.notify();
         });
@@ -135,7 +140,7 @@ impl HomeView {
         });
     }
 
-    fn build_and_apply(&self, cx: &mut Context<Self>) {
+    fn build_and_apply(&self, window: &mut Window, cx: &mut Context<Self>) {
         let s = self.state.read(cx);
         if !s.config.latin.has_regular() {
             self.state.update(cx, |s, cx| {
@@ -146,33 +151,13 @@ impl HomeView {
         }
 
         if !s.is_admin {
-            let state_path_res = s.save_temp_state();
-            cx.spawn(async move |this, cx| {
-                let confirmed = MessageDialog::new()
-                    .set_level(MessageLevel::Info)
-                    .set_title("Administrator Privileges Required")
-                    .set_description(
-                        "Modifying Windows system fonts requires Administrator privileges. Relaunch elevated now?",
-                    )
-                    .set_buttons(MessageButtons::YesNo)
-                    .show()
-                    == MessageDialogResult::Yes;
-                if confirmed && let Ok(state_path) = state_path_res {
-                    match relaunch_elevated(&state_path) {
-                        Ok(true) => std::process::exit(0),
-                        Ok(false) => {}
-                        Err(e) => {
-                            let _ = this.update(cx, |view, cx| {
-                                view.state.update(cx, |s, cx| {
-                                    s.last_error = Some(format!("Elevation failed: {e}"));
-                                    cx.notify();
-                                });
-                            });
-                        }
-                    }
-                }
-            })
-            .detach();
+            prompt_elevated_relaunch(
+                self.state.clone(),
+                &self.confirm_modal,
+                "Modifying Windows system fonts requires Administrator privileges. Relaunch elevated now?",
+                window,
+                cx,
+            );
             return;
         }
 
@@ -300,62 +285,26 @@ impl HomeView {
         });
     }
 
-    fn restore_system(&self, cx: &mut Context<Self>) {
+    fn restore_system(&self, window: &mut Window, cx: &mut Context<Self>) {
         let s = self.state.read(cx);
         if !s.is_admin {
-            let state_path_res = s.save_temp_state();
-            cx.spawn(async move |_, _cx| {
-                let confirmed = MessageDialog::new()
-                    .set_level(MessageLevel::Info)
-                    .set_title("Administrator Privileges Required")
-                    .set_description(
-                        "Restoring Windows system fonts requires Administrator privileges. Relaunch elevated now?",
-                    )
-                    .set_buttons(MessageButtons::YesNo)
-                    .show()
-                    == MessageDialogResult::Yes;
-                if confirmed
-                    && let Ok(state_path) = state_path_res
-                    && let Ok(true) = relaunch_elevated(&state_path)
-                {
-                    std::process::exit(0);
-                }
-            })
-            .detach();
+            prompt_elevated_relaunch(
+                self.state.clone(),
+                &self.confirm_modal,
+                "Restoring Windows system fonts requires Administrator privileges. Relaunch elevated now?",
+                window,
+                cx,
+            );
             return;
         }
 
         let has_clones = s.clones_installed;
-        cx.spawn(async move |this, cx| {
-            let confirm_restore = MessageDialog::new()
-                .set_level(MessageLevel::Warning)
-                .set_title("Restore Original Font")
-                .set_description(
-                    "This will reset all Segoe UI Registry entries back to stock Windows defaults. Proceed?",
-                )
-                .set_buttons(MessageButtons::YesNo)
-                .show()
-                == MessageDialogResult::Yes;
-            if !confirm_restore {
-                return;
-            }
-            let delete_clones = if has_clones {
-                MessageDialog::new()
-                    .set_level(MessageLevel::Info)
-                    .set_title("Remove Segoe UI Clone?")
-                    .set_description(
-                        "Segoe UI Clone fonts are installed. Do you want to remove them as well?",
-                    )
-                    .set_buttons(MessageButtons::YesNo)
-                    .show()
-                    == MessageDialogResult::Yes
-            } else {
-                false
-            };
-            let res = restore_original_fonts(delete_clones);
-            let _ = this.update(cx, |view, cx| match res {
+        let state_handle = self.state.clone();
+        let confirm_modal = self.confirm_modal.clone();
+        let run_restore = move |delete_clones: bool, cx: &mut gpui::App| {
+            match restore_original_fonts(delete_clones) {
                 Ok(()) => {
-                    view.state.update(cx, |s, cx| {
+                    state_handle.update(cx, |s, cx| {
                         s.system_state = check_system_state();
                         s.clones_installed = are_clones_installed();
                         s.last_error = None;
@@ -367,14 +316,45 @@ impl HomeView {
                     });
                 }
                 Err(e) => {
-                    view.state.update(cx, |s, cx| {
+                    state_handle.update(cx, |s, cx| {
                         s.last_error = Some(format!("Restore failed: {e}"));
                         cx.notify();
                     });
                 }
-            });
-        })
-        .detach();
+            }
+        };
+
+        self.confirm_modal.update(cx, |m, cx| {
+            m.open(
+                ConfirmRequest {
+                    title: "Restore Original Font".to_string(),
+                    message: "This will reset all Segoe UI Registry entries back to stock Windows defaults. Proceed?".to_string(),
+                    confirm_label: "Restore".to_string(),
+                    dangerous: true,
+                    on_confirm: Box::new(move |window, cx| {
+                        if has_clones {
+                            confirm_modal.update(cx, |m2, cx| {
+                                m2.open(
+                                    ConfirmRequest {
+                                        title: "Remove Segoe UI Clone?".to_string(),
+                                        message: "Segoe UI Clone fonts are installed. Do you want to remove them as well?".to_string(),
+                                        confirm_label: "Remove Clones".to_string(),
+                                        dangerous: true,
+                                        on_confirm: Box::new(move |_, cx| run_restore(true, cx)),
+                                    },
+                                    window,
+                                    cx,
+                                );
+                            });
+                        } else {
+                            run_restore(false, cx);
+                        }
+                    }),
+                },
+                window,
+                cx,
+            );
+        });
     }
 
     fn render_font_card(
@@ -600,15 +580,6 @@ impl HomeView {
     }
 }
 
-fn slot_mut(cfg: &mut crate::app_state::PersistedConfig, slot: FontTargetSlot) -> &mut FontFamilySelection {
-    match slot {
-        FontTargetSlot::Latin => &mut cfg.latin,
-        FontTargetSlot::Script(script) => cfg.script_font_mut(script),
-        FontTargetSlot::LatinItalic => &mut cfg.latin_italic,
-        FontTargetSlot::ScriptItalic(script) => cfg.script_italic_font_mut(script),
-    }
-}
-
 impl Render for HomeView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let s = self.state.read(cx);
@@ -769,10 +740,25 @@ impl Render for HomeView {
         }
 
         div()
-            .id("home-scroll")
+            .relative()
             .flex_1()
             .min_h_0()
-            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify()))
+            .child(
+                div()
+                    .id("home-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.scroll_handle)
+            .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| {
+                if ev.keystroke.key == "escape" && this.script_dropdown_open {
+                    this.script_dropdown_open = false;
+                    cx.notify();
+                }
+            }))
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
@@ -786,6 +772,25 @@ impl Render for HomeView {
             .flex()
             .flex_col()
             .gap(px(14.0))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .child(
+                        div()
+                            .text_lg()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(theme.text)
+                            .child("Font Replacer & Merger"),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.text_2)
+                            .child("Select Latin and secondary script fonts, then build & apply system-wide."),
+                    ),
+            )
             .child(self.render_font_card(
                 FontCardProps {
                     title: "1. Primary English / Latin Font".into(),
@@ -861,11 +866,20 @@ impl Render for HomeView {
                                                 theme,
                                             ))
                                             .when(!ff_ready, |d| {
-                                                d.child(StatusPill::new(
-                                                    "FontForge Missing",
-                                                    BadgeTone::Warn,
-                                                    theme,
-                                                ))
+                                                d.child(
+                                                    VantageButton::new(
+                                                        "ff-missing-cta",
+                                                        "FontForge Missing · Configure",
+                                                        theme,
+                                                    )
+                                                    .variant(ButtonVariant::Danger)
+                                                    .on_click(cx.listener(|this, _, _, cx| {
+                                                        this.state.update(cx, |s, cx| {
+                                                            s.active_tab = NavTab::Settings;
+                                                            cx.notify();
+                                                        });
+                                                    })),
+                                                )
                                             }),
                                     )
                                     .child(div().text_sm().text_color(theme.text).child(status_text)),
@@ -890,8 +904,8 @@ impl Render for HomeView {
                                             VantageButton::new("restore-btn", "Restore Original Font", theme)
                                                 .icon("icons/rotate-ccw.svg")
                                                 .variant(ButtonVariant::Danger)
-                                                .on_click(cx.listener(|this, _, _, cx| {
-                                                    this.restore_system(cx)
+                                                .on_click(cx.listener(|this, _, window, cx| {
+                                                    this.restore_system(window, cx)
                                                 })),
                                         )
                                     })
@@ -900,8 +914,8 @@ impl Render for HomeView {
                                             .icon("icons/play.svg")
                                             .variant(ButtonVariant::Primary)
                                             .disabled(!can_build)
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.build_and_apply(cx)
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.build_and_apply(window, cx)
                                             })),
                                     ),
                             ),
@@ -925,5 +939,7 @@ impl Render for HomeView {
                             ),
                     ),
             )
+            )
+            .child(crate::ui::components::vertical_scrollbar(&self.scroll_handle, theme))
     }
 }

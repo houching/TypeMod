@@ -1,7 +1,7 @@
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    App, ClickEvent, ElementId, InteractiveElement, IntoElement, ParentElement, RenderOnce,
-    SharedString, StatefulInteractiveElement, Styled, Window, div, px, svg,
+    App, AppContext, ClickEvent, ElementId, InteractiveElement, IntoElement, ParentElement,
+    RenderOnce, SharedString, StatefulInteractiveElement, Styled, Window, div, px, svg,
 };
 
 use crate::ui::theme::VantageTheme;
@@ -73,8 +73,33 @@ pub struct VantageButton {
     align_left: bool,
     variant: ButtonVariant,
     disabled: bool,
+    tooltip_text: Option<SharedString>,
     theme: VantageTheme,
     on_click: Option<ClickHandler>,
+}
+
+struct SimpleTooltip {
+    text: SharedString,
+    theme: VantageTheme,
+}
+
+impl gpui::Render for SimpleTooltip {
+    fn render(
+        &mut self,
+        _window: &mut Window,
+        _cx: &mut gpui::Context<'_, SimpleTooltip>,
+    ) -> impl IntoElement {
+        div()
+            .px(px(8.0))
+            .py(px(4.0))
+            .rounded(px(4.0))
+            .bg(self.theme.surface_3)
+            .border_1()
+            .border_color(self.theme.line_2)
+            .text_xs()
+            .text_color(self.theme.text)
+            .child(self.text.clone())
+    }
 }
 
 impl VantageButton {
@@ -91,6 +116,7 @@ impl VantageButton {
             align_left: false,
             variant: ButtonVariant::Secondary,
             disabled: false,
+            tooltip_text: None,
             theme,
             on_click: None,
         }
@@ -118,6 +144,11 @@ impl VantageButton {
 
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
+        self
+    }
+
+    pub fn tooltip(mut self, text: impl Into<SharedString>) -> Self {
+        self.tooltip_text = Some(text.into());
         self
     }
 
@@ -199,6 +230,173 @@ impl RenderOnce for VantageButton {
             }
         }
 
+        if let Some(tip) = self.tooltip_text {
+            let tip_theme = self.theme;
+            el = el.tooltip(move |_window, cx| {
+                cx.new(|_| SimpleTooltip {
+                    text: tip.clone(),
+                    theme: tip_theme,
+                })
+                .into()
+            });
+        }
+
         el
     }
+}
+
+pub fn vantage_card(theme: VantageTheme) -> gpui::Div {
+    div()
+        .bg(theme.surface)
+        .border_1()
+        .border_color(theme.line)
+        .rounded(px(8.0))
+        .p(px(16.0))
+        .flex()
+        .flex_col()
+        .gap(px(12.0))
+}
+
+pub fn view_header(
+    title: impl Into<SharedString>,
+    subtitle: impl Into<SharedString>,
+    theme: VantageTheme,
+) -> gpui::Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(2.0))
+        .child(
+            div()
+                .text_lg()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(theme.text)
+                .child(title.into()),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(theme.text_2)
+                .child(subtitle.into()),
+        )
+}
+
+#[derive(IntoElement)]
+pub struct ToggleSwitch {
+    id: ElementId,
+    checked: bool,
+    theme: VantageTheme,
+    on_click: Option<ClickHandler>,
+}
+
+impl ToggleSwitch {
+    pub fn new(id: impl Into<ElementId>, checked: bool, theme: VantageTheme) -> Self {
+        Self {
+            id: id.into(),
+            checked,
+            theme,
+            on_click: None,
+        }
+    }
+
+    pub fn on_click(
+        mut self,
+        handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_click = Some(Box::new(handler));
+        self
+    }
+}
+
+impl RenderOnce for ToggleSwitch {
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let track_bg = if self.checked {
+            self.theme.accent
+        } else {
+            self.theme.surface_3
+        };
+        let border_col = if self.checked {
+            self.theme.accent
+        } else {
+            self.theme.line_2
+        };
+        let knob_left = if self.checked { px(20.0) } else { px(2.0) };
+        let knob_bg = if self.checked {
+            self.theme.accent_ink
+        } else {
+            self.theme.text_2
+        };
+
+        let mut el = div()
+            .id(self.id)
+            .w(px(40.0))
+            .h(px(22.0))
+            .rounded(px(11.0))
+            .bg(track_bg)
+            .border_1()
+            .border_color(border_col)
+            .relative()
+            .cursor_pointer()
+            .flex_shrink_0()
+            .child(
+                div()
+                    .absolute()
+                    .top(px(2.0))
+                    .left(knob_left)
+                    .size(px(16.0))
+                    .rounded(px(8.0))
+                    .bg(knob_bg),
+            );
+        if let Some(handler) = self.on_click {
+            el = el.on_click(handler);
+        }
+        el
+    }
+}
+
+pub fn vertical_scrollbar(
+    handle: &gpui::ScrollHandle,
+    theme: VantageTheme,
+) -> gpui::AnyElement {
+    let max_y: f32 = handle.max_offset().height.into();
+    if max_y <= 1.0 {
+        return div().into_any_element();
+    }
+    let bounds = handle.bounds();
+    let view_h: f32 = bounds.size.height.into();
+    let view_h = if view_h > 1.0 { view_h } else { 400.0 };
+    let content_h = view_h + max_y;
+    let thumb_frac = (view_h / content_h).clamp(0.10, 1.0);
+    let scroll_y = (-f32::from(handle.offset().y)).clamp(0.0, max_y);
+    let top_frac = (scroll_y / max_y) * (1.0 - thumb_frac);
+    let handle_clone = handle.clone();
+
+    div()
+        .id("v-scrollbar-track")
+        .absolute()
+        .top(px(4.0))
+        .bottom(px(4.0))
+        .right(px(3.0))
+        .w(px(6.0))
+        .rounded(px(3.0))
+        .bg(theme.line.opacity(0.35))
+        .cursor_pointer()
+        .on_mouse_down(gpui::MouseButton::Left, move |ev, _window, _cx| {
+            let track_top: f32 = bounds.top().into();
+            let click_y: f32 = ev.position.y.into();
+            let ratio = ((click_y - track_top) / view_h).clamp(0.0, 1.0);
+            let target_y = (ratio * max_y).clamp(0.0, max_y);
+            handle_clone.set_offset(gpui::Point::new(px(0.0), px(-target_y)));
+        })
+        .child(
+            div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .top(gpui::relative(top_frac))
+                .h(gpui::relative(thumb_frac))
+                .rounded(px(3.0))
+                .bg(theme.text_3.opacity(0.65)),
+        )
+        .into_any_element()
 }

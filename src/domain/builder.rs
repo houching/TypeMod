@@ -11,7 +11,7 @@ use serde::Serialize;
 
 use crate::app_state::{AppState, FontFamilySelection, MergingMode, PersistedConfig};
 use crate::domain::backup_cloner::{clone_original_segoe, ensure_backup};
-use crate::domain::registry::{set_font_registry_entries, windows_fonts_dir};
+use crate::domain::registry::{SEGOE_FONT_SPECS, set_font_registry_entries, windows_fonts_dir};
 
 #[derive(Debug, Clone)]
 pub enum BuildProgressEvent {
@@ -555,11 +555,18 @@ pub fn run_build_and_apply(
                 &mut on_event,
             )?;
             temp_files.extend(temps);
-            for (i, (w, _)) in NORMAL_WEIGHT_SPECS.iter().enumerate() {
+            for (i, spec) in SEGOE_FONT_SPECS
+                .iter()
+                .filter(|s| !s.is_italic && !s.is_variable)
+                .enumerate()
+            {
                 if let Some(p) = paths.get(i)
                     && p != "NONE"
                 {
-                    extra_normal_map.entry(*w).or_default().push(p.clone());
+                    extra_normal_map
+                        .entry(spec.weight_name)
+                        .or_default()
+                        .push(p.clone());
                 }
             }
         }
@@ -584,11 +591,14 @@ pub fn run_build_and_apply(
                 &mut on_event,
             )?;
             temp_files.extend(temps);
-            for (i, (w, _)) in ITALIC_WEIGHT_SPECS.iter().enumerate() {
+            for (i, spec) in SEGOE_FONT_SPECS.iter().filter(|s| s.is_italic).enumerate() {
                 if let Some(p) = paths.get(i)
                     && p != "NONE"
                 {
-                    extra_italic_map.entry(*w).or_default().push(p.clone());
+                    extra_italic_map
+                        .entry(spec.weight_name)
+                        .or_default()
+                        .push(p.clone());
                 }
             }
         }
@@ -670,25 +680,11 @@ pub fn run_build_and_apply(
         status: "Installing fonts & updating Windows Registry...".to_string(),
     });
 
-    let mut generated: Vec<(&str, &str)> = vec![
-        ("segoeuil_system_mod.ttf", "Segoe UI Light (TrueType)"),
-        ("segoeuisl_system_mod.ttf", "Segoe UI Semilight (TrueType)"),
-        ("segoeui_system_mod.ttf", "Segoe UI (TrueType)"),
-        ("seguisb_system_mod.ttf", "Segoe UI Semibold (TrueType)"),
-        ("segoeuib_system_mod.ttf", "Segoe UI Bold (TrueType)"),
-        ("seguibl_system_mod.ttf", "Segoe UI Black (TrueType)"),
-        ("SegUIVar_system_mod.ttf", "Segoe UI Variable (TrueType)"),
-    ];
-    if italic_enabled {
-        generated.extend_from_slice(&[
-            ("seguili_system_mod.ttf", "Segoe UI Light Italic (TrueType)"),
-            ("seguisli_system_mod.ttf", "Segoe UI Semilight Italic (TrueType)"),
-            ("segoeuii_system_mod.ttf", "Segoe UI Italic (TrueType)"),
-            ("seguisbi_system_mod.ttf", "Segoe UI Semibold Italic (TrueType)"),
-            ("segoeuiz_system_mod.ttf", "Segoe UI Bold Italic (TrueType)"),
-            ("seguibli_system_mod.ttf", "Segoe UI Black Italic (TrueType)"),
-        ]);
-    }
+    let generated: Vec<(&str, &str)> = SEGOE_FONT_SPECS
+        .iter()
+        .filter(|s| italic_enabled || !s.is_italic)
+        .map(|s| (s.mod_file, s.reg_key))
+        .collect();
 
     let fonts_dir = windows_fonts_dir();
     let tag = std::time::SystemTime::now()
@@ -759,24 +755,6 @@ pub fn run_build_and_apply(
     Ok(())
 }
 
-const NORMAL_WEIGHT_SPECS: [(&str, &str); 6] = [
-    ("Light", "segoeuil.ttf"),
-    ("Semilight", "segoeuisl.ttf"),
-    ("Regular", "segoeui.ttf"),
-    ("Semibold", "seguisb.ttf"),
-    ("Bold", "segoeuib.ttf"),
-    ("Black", "seguibl.ttf"),
-];
-
-const ITALIC_WEIGHT_SPECS: [(&str, &str); 6] = [
-    ("Light Italic", "seguili.ttf"),
-    ("Semilight Italic", "seguisli.ttf"),
-    ("Italic", "segoeuii.ttf"),
-    ("Semibold Italic", "seguisbi.ttf"),
-    ("Bold Italic", "segoeuiz.ttf"),
-    ("Black Italic", "seguibli.ttf"),
-];
-
 struct EngineInvocation<'a> {
     ff_exe: &'a Path,
     script: &'a Path,
@@ -803,18 +781,14 @@ fn run_fontforge_engine(
     full_log: &mut String,
     on_event: &mut impl FnMut(BuildProgressEvent),
 ) -> anyhow::Result<()> {
-    let specs = if inv.italic {
-        &ITALIC_WEIGHT_SPECS
-    } else {
-        &NORMAL_WEIGHT_SPECS
-    };
-    let jobs: Vec<(&'static str, &str, &str, &'static str)> = specs
+    let jobs: Vec<(&'static str, &str, &str, &'static str)> = SEGOE_FONT_SPECS
         .iter()
+        .filter(|s| !s.is_variable && s.is_italic == inv.italic)
         .enumerate()
-        .filter_map(|(i, (weight, sys_ttf))| {
+        .filter_map(|(i, spec)| {
             let lat = inv.latin_paths.get(i).map(String::as_str).unwrap_or("NONE");
             let ara = inv.khmer_paths.get(i).map(String::as_str).unwrap_or("NONE");
-            (lat != "NONE").then_some((*weight, lat, ara, *sys_ttf))
+            (lat != "NONE").then_some((spec.weight_name, lat, ara, spec.stock_file))
         })
         .collect();
 

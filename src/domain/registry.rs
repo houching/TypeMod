@@ -15,35 +15,150 @@ const FONTS_REG_PATH: PCWSTR = w!(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion
 const FONT_SUBSTITUTES_REG_PATH: PCWSTR =
     w!(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes");
 
-pub const STOCK_SEGOE_ENTRIES: &[(&str, &str)] = &[
-    ("Segoe UI (TrueType)", "segoeui.ttf"),
-    ("Segoe UI Bold (TrueType)", "segoeuib.ttf"),
-    ("Segoe UI Black (TrueType)", "seguibl.ttf"),
-    ("Segoe UI Light (TrueType)", "segoeuil.ttf"),
-    ("Segoe UI Semilight (TrueType)", "segoeuisl.ttf"),
-    ("Segoe UI Semibold (TrueType)", "seguisb.ttf"),
-    ("Segoe UI Variable (TrueType)", "SegUIVar.ttf"),
-    ("Segoe UI Italic (TrueType)", "segoeuii.ttf"),
-    ("Segoe UI Bold Italic (TrueType)", "segoeuiz.ttf"),
-    ("Segoe UI Light Italic (TrueType)", "seguili.ttf"),
-    ("Segoe UI Semilight Italic (TrueType)", "seguisli.ttf"),
-    ("Segoe UI Semibold Italic (TrueType)", "seguisbi.ttf"),
-    ("Segoe UI Black Italic (TrueType)", "seguibli.ttf"),
-];
+#[derive(Clone, Copy, Debug)]
+pub struct SegoeFontSpec {
+    pub weight_name: &'static str,
+    pub stock_file: &'static str,
+    pub mod_file: &'static str,
+    pub clone_file: &'static str,
+    pub reg_key: &'static str,
+    pub clone_reg_key: &'static str,
+    pub is_italic: bool,
+    pub is_variable: bool,
+}
 
-pub const CLONE_FONT_VALUES: &[&str] = &[
-    "Segoe UI Clone (TrueType)",
-    "Segoe UI Clone Bold (TrueType)",
-    "Segoe UI Clone Italic (TrueType)",
-    "Segoe UI Clone Bold Italic (TrueType)",
-    "Segoe UI Clone Light (TrueType)",
-    "Segoe UI Clone Light Italic (TrueType)",
-    "Segoe UI Clone Semilight (TrueType)",
-    "Segoe UI Clone Semilight Italic (TrueType)",
-    "Segoe UI Clone Semibold (TrueType)",
-    "Segoe UI Clone Semibold Italic (TrueType)",
-    "Segoe UI Clone Black (TrueType)",
-    "Segoe UI Clone Black Italic (TrueType)",
+/// Canonical Single Source of Truth for all 13 Windows Segoe UI font weights & registry mappings.
+pub const SEGOE_FONT_SPECS: &[SegoeFontSpec] = &[
+    SegoeFontSpec {
+        weight_name: "Light",
+        stock_file: "segoeuil.ttf",
+        mod_file: "segoeuil_system_mod.ttf",
+        clone_file: "clone_segoeuil.ttf",
+        reg_key: "Segoe UI Light (TrueType)",
+        clone_reg_key: "Segoe UI Clone Light (TrueType)",
+        is_italic: false,
+        is_variable: false,
+    },
+    SegoeFontSpec {
+        weight_name: "Semilight",
+        stock_file: "segoeuisl.ttf",
+        mod_file: "segoeuisl_system_mod.ttf",
+        clone_file: "clone_segoeuisl.ttf",
+        reg_key: "Segoe UI Semilight (TrueType)",
+        clone_reg_key: "Segoe UI Clone Semilight (TrueType)",
+        is_italic: false,
+        is_variable: false,
+    },
+    SegoeFontSpec {
+        weight_name: "Regular",
+        stock_file: "segoeui.ttf",
+        mod_file: "segoeui_system_mod.ttf",
+        clone_file: "clone_segoeui.ttf",
+        reg_key: "Segoe UI (TrueType)",
+        clone_reg_key: "Segoe UI Clone (TrueType)",
+        is_italic: false,
+        is_variable: false,
+    },
+    SegoeFontSpec {
+        weight_name: "Semibold",
+        stock_file: "seguisb.ttf",
+        mod_file: "seguisb_system_mod.ttf",
+        clone_file: "clone_seguisb.ttf",
+        reg_key: "Segoe UI Semibold (TrueType)",
+        clone_reg_key: "Segoe UI Clone Semibold (TrueType)",
+        is_italic: false,
+        is_variable: false,
+    },
+    SegoeFontSpec {
+        weight_name: "Bold",
+        stock_file: "segoeuib.ttf",
+        mod_file: "segoeuib_system_mod.ttf",
+        clone_file: "clone_segoeuib.ttf",
+        reg_key: "Segoe UI Bold (TrueType)",
+        clone_reg_key: "Segoe UI Clone Bold (TrueType)",
+        is_italic: false,
+        is_variable: false,
+    },
+    SegoeFontSpec {
+        weight_name: "Black",
+        stock_file: "seguibl.ttf",
+        mod_file: "seguibl_system_mod.ttf",
+        clone_file: "clone_seguibl.ttf",
+        reg_key: "Segoe UI Black (TrueType)",
+        clone_reg_key: "Segoe UI Clone Black (TrueType)",
+        is_italic: false,
+        is_variable: false,
+    },
+    SegoeFontSpec {
+        weight_name: "Variable",
+        stock_file: "SegUIVar.ttf",
+        mod_file: "SegUIVar_system_mod.ttf",
+        clone_file: "",
+        reg_key: "Segoe UI Variable (TrueType)",
+        clone_reg_key: "",
+        is_italic: false,
+        is_variable: true,
+    },
+    SegoeFontSpec {
+        weight_name: "Light Italic",
+        stock_file: "seguili.ttf",
+        mod_file: "seguili_system_mod.ttf",
+        clone_file: "clone_seguili.ttf",
+        reg_key: "Segoe UI Light Italic (TrueType)",
+        clone_reg_key: "Segoe UI Clone Light Italic (TrueType)",
+        is_italic: true,
+        is_variable: false,
+    },
+    SegoeFontSpec {
+        weight_name: "Semilight Italic",
+        stock_file: "seguisli.ttf",
+        mod_file: "seguisli_system_mod.ttf",
+        clone_file: "clone_seguisli.ttf",
+        reg_key: "Segoe UI Semilight Italic (TrueType)",
+        clone_reg_key: "Segoe UI Clone Semilight Italic (TrueType)",
+        is_italic: true,
+        is_variable: false,
+    },
+    SegoeFontSpec {
+        weight_name: "Italic",
+        stock_file: "segoeuii.ttf",
+        mod_file: "segoeuii_system_mod.ttf",
+        clone_file: "clone_segoeuii.ttf",
+        reg_key: "Segoe UI Italic (TrueType)",
+        clone_reg_key: "Segoe UI Clone Italic (TrueType)",
+        is_italic: true,
+        is_variable: false,
+    },
+    SegoeFontSpec {
+        weight_name: "Semibold Italic",
+        stock_file: "seguisbi.ttf",
+        mod_file: "seguisbi_system_mod.ttf",
+        clone_file: "clone_seguisbi.ttf",
+        reg_key: "Segoe UI Semibold Italic (TrueType)",
+        clone_reg_key: "Segoe UI Clone Semibold Italic (TrueType)",
+        is_italic: true,
+        is_variable: false,
+    },
+    SegoeFontSpec {
+        weight_name: "Bold Italic",
+        stock_file: "segoeuiz.ttf",
+        mod_file: "segoeuiz_system_mod.ttf",
+        clone_file: "clone_segoeuiz.ttf",
+        reg_key: "Segoe UI Bold Italic (TrueType)",
+        clone_reg_key: "Segoe UI Clone Bold Italic (TrueType)",
+        is_italic: true,
+        is_variable: false,
+    },
+    SegoeFontSpec {
+        weight_name: "Black Italic",
+        stock_file: "seguibli.ttf",
+        mod_file: "seguibli_system_mod.ttf",
+        clone_file: "clone_seguibli.ttf",
+        reg_key: "Segoe UI Black Italic (TrueType)",
+        clone_reg_key: "Segoe UI Clone Black Italic (TrueType)",
+        is_italic: true,
+        is_variable: false,
+    },
 ];
 
 pub fn windows_fonts_dir() -> PathBuf {
@@ -217,9 +332,9 @@ pub fn check_system_state() -> SystemFontState {
 /// Removes leftover `*_system_mod*.ttf` files from `%WINDIR%\Fonts` that are not
 /// currently referenced by `HKLM\...\Fonts`. Returns `true` if no unreferenced mod files remain.
 pub fn cleanup_stale_mod_files() -> bool {
-    let active: std::collections::HashSet<String> = STOCK_SEGOE_ENTRIES
+    let active: std::collections::HashSet<String> = SEGOE_FONT_SPECS
         .iter()
-        .filter_map(|(k, _)| query_font_value(k))
+        .filter_map(|s| query_font_value(s.reg_key))
         .map(|v| v.to_ascii_lowercase())
         .collect();
 
@@ -241,7 +356,11 @@ pub fn cleanup_stale_mod_files() -> bool {
 }
 
 pub fn are_clones_installed() -> bool {
-    if CLONE_FONT_VALUES.iter().any(|k| query_font_value(k).is_some()) {
+    if SEGOE_FONT_SPECS
+        .iter()
+        .filter(|s| !s.clone_reg_key.is_empty())
+        .any(|s| query_font_value(s.clone_reg_key).is_some())
+    {
         return true;
     }
     if let Ok(entries) = fs::read_dir(windows_fonts_dir()) {
@@ -309,15 +428,19 @@ pub fn set_font_registry_entries(entries: &[(&str, &str)]) -> anyhow::Result<()>
 }
 
 pub fn restore_original_fonts(delete_clones: bool) -> anyhow::Result<()> {
-    set_font_registry_entries(STOCK_SEGOE_ENTRIES)?;
+    let stock_entries: Vec<(&str, &str)> = SEGOE_FONT_SPECS
+        .iter()
+        .map(|s| (s.reg_key, s.stock_file))
+        .collect();
+    set_font_registry_entries(&stock_entries)?;
 
     if delete_clones {
         let mut hkey = HKEY::default();
         if unsafe { RegOpenKeyExW(HKEY_LOCAL_MACHINE, FONTS_REG_PATH, Some(0), KEY_WRITE, &mut hkey) }
             .is_ok()
         {
-            for k in CLONE_FONT_VALUES {
-                let k_w = to_wide_null(k);
+            for spec in SEGOE_FONT_SPECS.iter().filter(|s| !s.clone_reg_key.is_empty()) {
+                let k_w = to_wide_null(spec.clone_reg_key);
                 unsafe {
                     let _ = RegDeleteValueW(hkey, PCWSTR(k_w.as_ptr()));
                 }
@@ -359,12 +482,12 @@ pub fn live_refresh_font_cache() {
 
     // Remove modded fonts or re-add stock fonts in current GDI session
     let is_modded = check_system_state() == SystemFontState::Modded;
-    for (reg_key, stock_file) in STOCK_SEGOE_ENTRIES {
-        let active_mod = query_font_value(reg_key)
+    for spec in SEGOE_FONT_SPECS {
+        let active_mod = query_font_value(spec.reg_key)
             .filter(|v| v.to_ascii_lowercase().contains("system_mod"))
-            .unwrap_or_else(|| stock_file.replace(".ttf", "_system_mod.ttf"));
+            .unwrap_or_else(|| spec.mod_file.to_string());
         let mod_path = to_wide_null(&fonts_dir.join(&active_mod).to_string_lossy());
-        let stock_path = to_wide_null(&fonts_dir.join(stock_file).to_string_lossy());
+        let stock_path = to_wide_null(&fonts_dir.join(spec.stock_file).to_string_lossy());
         unsafe {
             if is_modded {
                 let _ = RemoveFontResourceW(PCWSTR(stock_path.as_ptr()));

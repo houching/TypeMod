@@ -1,4 +1,5 @@
 pub mod components;
+pub mod confirm_modal;
 pub mod font_picker_modal;
 pub mod home_view;
 pub mod icons;
@@ -7,4 +8,5 @@ pub mod preview_view;
 pub mod resizer_view;
 pub mod settings_view;
 pub mod shell;
+pub mod text_input;
 pub mod theme;

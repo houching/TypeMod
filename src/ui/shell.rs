@@ -8,12 +8,14 @@ use gpui::{
 
 use crate::app_state::{AppState, NavTab, SystemFontState};
 use crate::ui::components::{BadgeTone, ButtonVariant, StatusPill, VantageButton};
+use crate::ui::confirm_modal::{ConfirmModal, ConfirmRequest};
 use crate::ui::font_picker_modal::FontPickerModal;
 use crate::ui::home_view::HomeView;
 use crate::ui::log_drawer::LogDrawer;
 use crate::ui::preview_view::PreviewView;
 use crate::ui::resizer_view::ResizerView;
 use crate::ui::settings_view::SettingsView;
+use crate::ui::theme::ThemeMode;
 
 pub struct ShellView {
     state: Entity<AppState>,
@@ -22,6 +24,7 @@ pub struct ShellView {
     resizer: Entity<ResizerView>,
     settings: Entity<SettingsView>,
     picker: Entity<FontPickerModal>,
+    confirm_modal: Entity<ConfirmModal>,
     log_drawer: Entity<LogDrawer>,
     ui_font_family: SharedString,
     logo_img: Arc<Image>,
@@ -47,10 +50,11 @@ fn pick_safe_ui_font(cx: &gpui::App) -> SharedString {
 impl ShellView {
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         let picker = cx.new(|cx| FontPickerModal::new(state.clone(), cx));
-        let home = cx.new(|_| HomeView::new(state.clone(), picker.clone()));
+        let confirm_modal = cx.new(|cx| ConfirmModal::new(state.clone(), cx));
+        let home = cx.new(|_| HomeView::new(state.clone(), picker.clone(), confirm_modal.clone()));
         let preview = cx.new(|cx| PreviewView::new(state.clone(), cx));
         let resizer = cx.new(|_| ResizerView::new(state.clone()));
-        let settings = cx.new(|_| SettingsView::new(state.clone()));
+        let settings = cx.new(|_| SettingsView::new(state.clone(), confirm_modal.clone()));
         let log_drawer = cx.new(|_| LogDrawer::new(state.clone()));
         let ui_font_family = pick_safe_ui_font(cx);
         let logo_img = Arc::new(Image::from_bytes(
@@ -68,6 +72,7 @@ impl ShellView {
             resizer,
             settings,
             picker,
+            confirm_modal,
             log_drawer,
             ui_font_family,
             logo_img,
@@ -89,6 +94,17 @@ impl ShellView {
             cx.notify();
         });
     }
+
+    fn toggle_theme(&self, cx: &mut Context<Self>) {
+        self.state.update(cx, |s, cx| {
+            s.config.theme = match s.config.theme {
+                ThemeMode::Dark => ThemeMode::Light,
+                ThemeMode::Light => ThemeMode::Dark,
+            };
+            let _ = s.save_config();
+            cx.notify();
+        });
+    }
 }
 
 impl Render for ShellView {
@@ -100,6 +116,10 @@ impl Render for ShellView {
         let active_tab = s.active_tab;
         let is_admin = s.is_admin;
         let sys_state = s.system_state;
+        let (theme_btn_label, theme_icon) = match s.config.theme {
+            ThemeMode::Dark => ("Light Mode", "icons/sun.svg"),
+            ThemeMode::Light => ("Dark Mode", "icons/moon.svg"),
+        };
         let last_error = s.last_error.clone();
         let last_notice = s.last_notice.clone();
 
@@ -107,13 +127,6 @@ impl Render for ShellView {
             SystemFontState::Original => BadgeTone::Ok,
             SystemFontState::Modded => BadgeTone::Accent,
             SystemFontState::PendingRestoreReboot => BadgeTone::Warn,
-        };
-
-        let breadcrumb = match active_tab {
-            NavTab::Home => "Fonts > Replace & Merge",
-            NavTab::Preview => "Fonts > Preview & Test",
-            NavTab::Resizer => "System > Font Resizer",
-            NavTab::Settings => "System > Settings",
         };
 
         div()
@@ -192,6 +205,11 @@ impl Render for ShellView {
                                                 VantageButton::new("rail-toggle", "", theme)
                                                     .icon("icons/panel-left.svg")
                                                     .icon_only(true)
+                                                    .tooltip(if collapsed {
+                                                        "Expand sidebar"
+                                                    } else {
+                                                        "Collapse sidebar"
+                                                    })
                                                     .variant(ButtonVariant::Ghost)
                                                     .on_click(cx.listener(|this, _, _, cx| {
                                                         this.toggle_rail(cx)
@@ -209,6 +227,7 @@ impl Render for ShellView {
                                             .icon("icons/type.svg")
                                             .icon_only(collapsed)
                                             .align_left(true)
+                                            .tooltip("Font Replacer")
                                             .variant(if active_tab == NavTab::Home {
                                                 ButtonVariant::Primary
                                             } else {
@@ -223,6 +242,7 @@ impl Render for ShellView {
                                             .icon("icons/eye.svg")
                                             .icon_only(collapsed)
                                             .align_left(true)
+                                            .tooltip("Font Preview")
                                             .variant(if active_tab == NavTab::Preview {
                                                 ButtonVariant::Primary
                                             } else {
@@ -237,6 +257,7 @@ impl Render for ShellView {
                                             .icon("icons/sliders-horizontal.svg")
                                             .icon_only(collapsed)
                                             .align_left(true)
+                                            .tooltip("Font Resizer")
                                             .variant(if active_tab == NavTab::Resizer {
                                                 ButtonVariant::Primary
                                             } else {
@@ -251,6 +272,7 @@ impl Render for ShellView {
                                             .icon("icons/settings.svg")
                                             .icon_only(collapsed)
                                             .align_left(true)
+                                            .tooltip("Settings")
                                             .variant(if active_tab == NavTab::Settings {
                                                 ButtonVariant::Primary
                                             } else {
@@ -262,49 +284,114 @@ impl Render for ShellView {
                                     ),
                             ),
                     )
-                    // Bottom-left About App block
-                    .child(if collapsed {
+                    // Bottom-left Theme, Status & Version block
+                    .child(
                         div()
                             .w_full()
-                            .py(px(6.0))
-                            .border_t_1()
-                            .border_color(theme.line)
                             .flex()
-                            .justify_center()
+                            .flex_col()
+                            .gap(px(8.0))
                             .child(
-                                div()
-                                    .text_xs()
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(theme.text_3)
-                                    .child(format!("v{}", env!("CARGO_PKG_VERSION"))),
+                                VantageButton::new("rail-theme-toggle", theme_btn_label, theme)
+                                    .icon(theme_icon)
+                                    .icon_only(collapsed)
+                                    .align_left(true)
+                                    .tooltip(theme_btn_label)
+                                    .variant(ButtonVariant::Ghost)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.toggle_theme(cx)
+                                    })),
                             )
-                            .into_any_element()
-                    } else {
-                        div()
-                            .w_full()
-                            .px(px(10.0))
-                            .py(px(8.0))
-                            .border_t_1()
-                            .border_color(theme.line)
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .gap(px(6.0))
-                            .child(
+                            .child(if collapsed {
                                 div()
-                                    .text_xs()
-                                    .text_color(theme.text_3)
-                                    .child("Version"),
-                            )
-                            .child(StatusPill::new(
-                                format!("v{}", env!("CARGO_PKG_VERSION")),
-                                BadgeTone::Neutral,
-                                theme,
-                            ))
-                            .into_any_element()
-                    }),
+                                    .w_full()
+                                    .pt(px(8.0))
+                                    .border_t_1()
+                                    .border_color(theme.line)
+                                    .flex()
+                                    .flex_col()
+                                    .items_center()
+                                    .gap(px(4.0))
+                                    .child(StatusPill::new(
+                                        if is_admin { "ADM" } else { "USR" },
+                                        if is_admin {
+                                            BadgeTone::Ok
+                                        } else {
+                                            BadgeTone::Warn
+                                        },
+                                        theme,
+                                    ))
+                                    .child(StatusPill::new(
+                                        match sys_state {
+                                            SystemFontState::Original => "ORIG",
+                                            SystemFontState::Modded => "MOD",
+                                            SystemFontState::PendingRestoreReboot => "BOOT",
+                                        },
+                                        sys_tone,
+                                        theme,
+                                    ))
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .text_color(theme.text_3)
+                                            .child(format!("v{}", env!("CARGO_PKG_VERSION"))),
+                                    )
+                                    .into_any_element()
+                            } else {
+                                div()
+                                    .w_full()
+                                    .px(px(2.0))
+                                    .pt(px(8.0))
+                                    .border_t_1()
+                                    .border_color(theme.line)
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(8.0))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_wrap()
+                                            .items_center()
+                                            .gap(px(6.0))
+                                            .child(StatusPill::new(
+                                                if is_admin { "ADMIN" } else { "STANDARD USER" },
+                                                if is_admin {
+                                                    BadgeTone::Ok
+                                                } else {
+                                                    BadgeTone::Warn
+                                                },
+                                                theme,
+                                            ))
+                                            .child(StatusPill::new(
+                                                sys_state.label(),
+                                                sys_tone,
+                                                theme,
+                                            )),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .justify_between()
+                                            .gap(px(6.0))
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(theme.text_3)
+                                                    .child("Version"),
+                                            )
+                                            .child(StatusPill::new(
+                                                format!("v{}", env!("CARGO_PKG_VERSION")),
+                                                BadgeTone::Neutral,
+                                                theme,
+                                            )),
+                                    )
+                                    .into_any_element()
+                            }),
+                    ),
             )
-            // Main Column (Top Bar + Banner + View + LogDrawer)
+            // Main Column (View + Bottom Banner + LogDrawer)
             .child(
                 div()
                     .flex_1()
@@ -313,54 +400,21 @@ impl Render for ShellView {
                     .flex()
                     .flex_col()
                     .overflow_hidden()
-                    // Top Bar
-                    .child(
-                        div()
-                            .min_h(px(52.0))
-                            .w_full()
-                            .bg(theme.surface)
-                            .border_b_1()
-                            .border_color(theme.line)
-                            .px(px(20.0))
-                            .py(px(8.0))
-                            .flex()
-                            .flex_wrap()
-                            .items_center()
-                            .justify_between()
-                            .gap(px(8.0))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .font_weight(gpui::FontWeight::MEDIUM)
-                                    .text_color(theme.text_2)
-                                    .child(breadcrumb),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_wrap()
-                                    .items_center()
-                                    .gap(px(8.0))
-                                    .child(StatusPill::new(
-                                        if is_admin { "ADMIN" } else { "STANDARD USER" },
-                                        if is_admin {
-                                            BadgeTone::Ok
-                                        } else {
-                                            BadgeTone::Warn
-                                        },
-                                        theme,
-                                    ))
-                                    .child(StatusPill::new(sys_state.label(), sys_tone, theme)),
-                            ),
-                    )
-                    // Error / Notice Banner
+                    // Active Tab View
+                    .child(match active_tab {
+                        NavTab::Home => self.home.clone().into_any_element(),
+                        NavTab::Preview => self.preview.clone().into_any_element(),
+                        NavTab::Resizer => self.resizer.clone().into_any_element(),
+                        NavTab::Settings => self.settings.clone().into_any_element(),
+                    })
+                    // Bottom Error / Notice Banner
                     .when_some(last_error, |d, err| {
                         d.child(
                             div()
                                 .px(px(20.0))
                                 .py(px(8.0))
                                 .bg(theme.err_soft)
-                                .border_b_1()
+                                .border_t_1()
                                 .border_color(theme.err.opacity(0.4))
                                 .flex()
                                 .flex_wrap()
@@ -386,7 +440,7 @@ impl Render for ShellView {
                                 .px(px(20.0))
                                 .py(px(8.0))
                                 .bg(theme.ok_soft)
-                                .border_b_1()
+                                .border_t_1()
                                 .border_color(theme.ok.opacity(0.4))
                                 .flex()
                                 .flex_wrap()
@@ -418,25 +472,25 @@ impl Render for ShellView {
                                             .child(
                                                 VantageButton::new("reboot-now-btn", "Reboot Now", theme)
                                                     .variant(ButtonVariant::Primary)
-                                                    .on_click(|_, _, cx| {
-                                                        cx.spawn(async move |_cx| {
-                                                            let ok = rfd::MessageDialog::new()
-                                                                .set_level(rfd::MessageLevel::Warning)
-                                                                .set_title("Reboot System")
-                                                                .set_description(
-                                                                    "Save any open work before restarting. Reboot Windows now?",
-                                                                )
-                                                                .set_buttons(rfd::MessageButtons::YesNo)
-                                                                .show()
-                                                                == rfd::MessageDialogResult::Yes;
-                                                            if ok {
-                                                                let _ = std::process::Command::new("shutdown")
-                                                                    .args(["/r", "/t", "3"])
-                                                                    .spawn();
-                                                            }
-                                                        })
-                                                        .detach();
-                                                    }),
+                                                    .on_click(cx.listener(|this, _, window, cx| {
+                                                        this.confirm_modal.update(cx, |m, cx| {
+                                                            m.open(
+                                                                ConfirmRequest {
+                                                                    title: "Reboot System".to_string(),
+                                                                    message: "Save any open work before restarting. Reboot Windows now?".to_string(),
+                                                                    confirm_label: "Reboot Now".to_string(),
+                                                                    dangerous: true,
+                                                                    on_confirm: Box::new(|_, _| {
+                                                                        let _ = std::process::Command::new("shutdown")
+                                                                            .args(["/r", "/t", "3"])
+                                                                            .spawn();
+                                                                    }),
+                                                                },
+                                                                window,
+                                                                cx,
+                                                            );
+                                                        });
+                                                    })),
                                             )
                                         })
                                         .child(
@@ -452,17 +506,11 @@ impl Render for ShellView {
                                 ),
                         )
                     })
-                    // Active Tab View
-                    .child(match active_tab {
-                        NavTab::Home => self.home.clone().into_any_element(),
-                        NavTab::Preview => self.preview.clone().into_any_element(),
-                        NavTab::Resizer => self.resizer.clone().into_any_element(),
-                        NavTab::Settings => self.settings.clone().into_any_element(),
-                    })
                     // Bottom Log Drawer
                     .child(self.log_drawer.clone()),
             )
-            // Modal Overlay
+            // Modal Overlays
             .child(self.picker.clone())
+            .child(self.confirm_modal.clone())
     }
 }

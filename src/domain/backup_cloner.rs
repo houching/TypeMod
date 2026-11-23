@@ -3,26 +3,10 @@ use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 
 use crate::domain::registry::{
-    cleanup_stale_mod_files, set_font_registry_entries, windows_fonts_dir,
+    SEGOE_FONT_SPECS, cleanup_stale_mod_files, set_font_registry_entries, windows_fonts_dir,
 };
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
-pub const BACKUP_FILES: &[&str] = &[
-    "segoeui.ttf",
-    "segoeuib.ttf",
-    "segoeuii.ttf",
-    "segoeuiz.ttf",
-    "segoeuil.ttf",
-    "seguili.ttf",
-    "segoeuisl.ttf",
-    "seguisli.ttf",
-    "seguisb.ttf",
-    "seguisbi.ttf",
-    "seguibl.ttf",
-    "seguibli.ttf",
-    "SegUIVar.ttf",
-];
 
 pub fn backup_dir() -> PathBuf {
     std::env::current_exe()
@@ -38,9 +22,9 @@ pub fn ensure_backup() -> anyhow::Result<PathBuf> {
     fs::create_dir_all(&dir)?;
     let fonts_dir = windows_fonts_dir();
 
-    for file in BACKUP_FILES {
-        let src = fonts_dir.join(file);
-        let dst = dir.join(file);
+    for spec in SEGOE_FONT_SPECS {
+        let src = fonts_dir.join(spec.stock_file);
+        let dst = dir.join(spec.stock_file);
         if src.exists() && !dst.exists() {
             fs::copy(&src, &dst)?;
         }
@@ -51,11 +35,11 @@ pub fn ensure_backup() -> anyhow::Result<PathBuf> {
 
 pub fn backup_status() -> (usize, usize) {
     let dir = backup_dir();
-    let count = BACKUP_FILES
+    let count = SEGOE_FONT_SPECS
         .iter()
-        .filter(|f| dir.join(f).exists())
+        .filter(|s| dir.join(s.stock_file).exists())
         .count();
-    (count, BACKUP_FILES.len())
+    (count, SEGOE_FONT_SPECS.len())
 }
 
 pub fn export_built_fonts(dest_dir: &Path) -> anyhow::Result<usize> {
@@ -77,22 +61,6 @@ pub fn export_built_fonts(dest_dir: &Path) -> anyhow::Result<usize> {
     }
     Ok(exported)
 }
-
-const PACKAGE_FONT_MAP: &[(&str, &str)] = &[
-    ("segoeuil_system_mod.ttf", "Segoe UI Light (TrueType)"),
-    ("segoeuisl_system_mod.ttf", "Segoe UI Semilight (TrueType)"),
-    ("segoeui_system_mod.ttf", "Segoe UI (TrueType)"),
-    ("seguisb_system_mod.ttf", "Segoe UI Semibold (TrueType)"),
-    ("segoeuib_system_mod.ttf", "Segoe UI Bold (TrueType)"),
-    ("seguibl_system_mod.ttf", "Segoe UI Black (TrueType)"),
-    ("SegUIVar_system_mod.ttf", "Segoe UI Variable (TrueType)"),
-    ("seguili_system_mod.ttf", "Segoe UI Light Italic (TrueType)"),
-    ("seguisli_system_mod.ttf", "Segoe UI Semilight Italic (TrueType)"),
-    ("segoeuii_system_mod.ttf", "Segoe UI Italic (TrueType)"),
-    ("seguisbi_system_mod.ttf", "Segoe UI Semibold Italic (TrueType)"),
-    ("segoeuiz_system_mod.ttf", "Segoe UI Bold Italic (TrueType)"),
-    ("seguibli_system_mod.ttf", "Segoe UI Black Italic (TrueType)"),
-];
 
 fn unique_temp_dir(prefix: &str) -> PathBuf {
     let ts = std::time::SystemTime::now()
@@ -188,12 +156,12 @@ pub fn import_and_apply_package(src_zip: &Path) -> anyhow::Result<usize> {
         .map(|d| d.as_secs())
         .unwrap_or(1);
     let mut reg_updates: Vec<(&str, String)> = Vec::new();
-    for (file_name, reg_key) in PACKAGE_FONT_MAP {
-        let src = import_dir.join(file_name);
+    for spec in SEGOE_FONT_SPECS {
+        let src = import_dir.join(spec.mod_file);
         if fs::symlink_metadata(&src).is_ok_and(|m| m.file_type().is_file()) {
-            let tagged = file_name.replace(".ttf", &format!("_{tag}.ttf"));
+            let tagged = spec.mod_file.replace(".ttf", &format!("_{tag}.ttf"));
             fs::copy(&src, fonts_dir.join(&tagged))?;
-            reg_updates.push((*reg_key, tagged));
+            reg_updates.push((spec.reg_key, tagged));
         }
     }
 
@@ -241,30 +209,15 @@ pub fn patch_font_name_table(
 /// Clones backed-up Segoe UI fonts as `Segoe UI Clone` in pure Rust,
 /// then registers them in HKLM Fonts.
 pub fn clone_original_segoe(_fontforge_exe: &Path, backup_dir: &Path) -> anyhow::Result<()> {
-    const CLONE_ENTRIES: &[(&str, &str, &str)] = &[
-        ("segoeui.ttf", "clone_segoeui.ttf", "Segoe UI Clone (TrueType)"),
-        ("segoeuib.ttf", "clone_segoeuib.ttf", "Segoe UI Clone Bold (TrueType)"),
-        ("segoeuii.ttf", "clone_segoeuii.ttf", "Segoe UI Clone Italic (TrueType)"),
-        ("segoeuiz.ttf", "clone_segoeuiz.ttf", "Segoe UI Clone Bold Italic (TrueType)"),
-        ("segoeuil.ttf", "clone_segoeuil.ttf", "Segoe UI Clone Light (TrueType)"),
-        ("seguili.ttf", "clone_seguili.ttf", "Segoe UI Clone Light Italic (TrueType)"),
-        ("segoeuisl.ttf", "clone_segoeuisl.ttf", "Segoe UI Clone Semilight (TrueType)"),
-        ("seguisli.ttf", "clone_seguisli.ttf", "Segoe UI Clone Semilight Italic (TrueType)"),
-        ("seguisb.ttf", "clone_seguisb.ttf", "Segoe UI Clone Semibold (TrueType)"),
-        ("seguisbi.ttf", "clone_seguisbi.ttf", "Segoe UI Clone Semibold Italic (TrueType)"),
-        ("seguibl.ttf", "clone_seguibl.ttf", "Segoe UI Clone Black (TrueType)"),
-        ("seguibli.ttf", "clone_seguibli.ttf", "Segoe UI Clone Black Italic (TrueType)"),
-    ];
-
     let fonts_dir = windows_fonts_dir();
     let mut existing: Vec<(&str, &str)> = Vec::new();
 
-    for (src_file, out_file, reg_name) in CLONE_ENTRIES {
-        let src_path = backup_dir.join(src_file);
+    for spec in SEGOE_FONT_SPECS.iter().filter(|s| !s.clone_file.is_empty()) {
+        let src_path = backup_dir.join(spec.stock_file);
         if !src_path.exists() {
             continue;
         }
-        let dst_path = fonts_dir.join(out_file);
+        let dst_path = fonts_dir.join(spec.clone_file);
         patch_font_name_table(&src_path, &dst_path, |name_id, text| {
             if !text.contains("Segoe UI") {
                 return None;
@@ -276,7 +229,7 @@ pub fn clone_original_segoe(_fontforge_exe: &Path, backup_dir: &Path) -> anyhow:
             Some(new_text)
         })?;
         if dst_path.exists() {
-            existing.push((*reg_name, *out_file));
+            existing.push((spec.clone_reg_key, spec.clone_file));
         }
     }
 

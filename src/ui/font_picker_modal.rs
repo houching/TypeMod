@@ -2,14 +2,15 @@ use std::path::PathBuf;
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    Context, Entity, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent, MouseButton,
-    ParentElement, Render, StatefulInteractiveElement, Styled, Window, div, px,
+    Context, Entity, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, ParentElement,
+    Render, StatefulInteractiveElement, Styled, Window, div, px,
 };
 
-use crate::app_state::{AppState, SecondaryScript};
+use crate::app_state::{AppState, FontFamilySelection, PersistedConfig, SecondaryScript};
 use crate::domain::font_discovery::auto_detect_weights;
 use crate::domain::registry::list_installed_fonts;
 use crate::ui::components::{ButtonVariant, VantageButton};
+use crate::ui::text_input::{TextBoxProps, TextFieldState};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FontTargetSlot {
@@ -28,16 +29,24 @@ impl FontTargetSlot {
             Self::ScriptItalic(script) => format!("{} Italic Font", script.label()),
         }
     }
+
+    pub fn select_mut(self, cfg: &mut PersistedConfig) -> &mut FontFamilySelection {
+        match self {
+            Self::Latin => &mut cfg.latin,
+            Self::Script(script) => cfg.script_font_mut(script),
+            Self::LatinItalic => &mut cfg.latin_italic,
+            Self::ScriptItalic(script) => cfg.script_italic_font_mut(script),
+        }
+    }
 }
 
 pub struct FontPickerModal {
     pub is_open: bool,
     pub target: FontTargetSlot,
-    pub query: String,
+    pub input: TextFieldState,
     pub fonts: Vec<(String, PathBuf)>,
-    pub focus_handle: FocusHandle,
-    cursor_visible: bool,
-    _blink_task: Option<gpui::Task<()>>,
+    selected_idx: usize,
+    scroll_handle: gpui::ScrollHandle,
     state: Entity<AppState>,
 }
 
@@ -46,18 +55,17 @@ impl FontPickerModal {
         Self {
             is_open: false,
             target: FontTargetSlot::Latin,
-            query: String::new(),
+            input: TextFieldState::new("", cx.focus_handle()),
             fonts: Vec::new(),
-            focus_handle: cx.focus_handle(),
-            cursor_visible: true,
-            _blink_task: None,
+            selected_idx: 0,
+            scroll_handle: gpui::ScrollHandle::new(),
             state,
         }
     }
 
     fn start_blink(&mut self, cx: &mut Context<Self>) {
-        self.cursor_visible = true;
-        self._blink_task = Some(cx.spawn(async move |this, cx| {
+        self.input.cursor_visible = true;
+        self.input._blink_task = Some(cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor()
                     .timer(std::time::Duration::from_millis(530))
@@ -67,7 +75,7 @@ impl FontPickerModal {
                         if !modal.is_open {
                             return false;
                         }
-                        modal.cursor_visible = !modal.cursor_visible;
+                        modal.input.cursor_visible = !modal.input.cursor_visible;
                         cx.notify();
                         true
                     })
@@ -81,39 +89,68 @@ impl FontPickerModal {
 
     pub fn open(&mut self, target: FontTargetSlot, window: &mut Window, cx: &mut Context<Self>) {
         self.target = target;
-        self.query.clear();
+        self.input.clear();
+        self.selected_idx = 0;
         self.fonts = list_installed_fonts();
         self.is_open = true;
-        window.focus(&self.focus_handle);
+        window.focus(&self.input.focus_handle);
         self.start_blink(cx);
         cx.notify();
     }
 
     pub fn close(&mut self, cx: &mut Context<Self>) {
         self.is_open = false;
-        self._blink_task = None;
+        self.input._blink_task = None;
         cx.notify();
+    }
+
+    fn filtered_fonts(&self) -> (usize, Vec<(String, PathBuf)>) {
+        let query_lc = self.input.text.to_ascii_lowercase();
+        let total = self
+            .fonts
+            .iter()
+            .filter(|(name, _)| query_lc.is_empty() || name.to_ascii_lowercase().contains(&query_lc))
+            .count();
+        let list = self
+            .fonts
+            .iter()
+            .filter(|(name, _)| query_lc.is_empty() || name.to_ascii_lowercase().contains(&query_lc))
+            .take(150)
+            .cloned()
+            .collect();
+        (total, list)
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
         if !self.is_open {
             return;
         }
-        self.cursor_visible = true;
         match event.keystroke.key.as_str() {
             "escape" => {
                 self.close(cx);
             }
-            "backspace" => {
-                self.query.pop();
-                cx.notify();
+            "up" => {
+                if self.selected_idx > 0 {
+                    self.selected_idx -= 1;
+                    cx.notify();
+                }
+            }
+            "down" => {
+                let (_, filtered) = self.filtered_fonts();
+                if !filtered.is_empty() && self.selected_idx + 1 < filtered.len() {
+                    self.selected_idx += 1;
+                    cx.notify();
+                }
+            }
+            "enter" => {
+                let (_, filtered) = self.filtered_fonts();
+                if let Some((name, path)) = filtered.get(self.selected_idx).cloned() {
+                    self.select_font(name, path, cx);
+                }
             }
             _ => {
-                if let Some(ch) = &event.keystroke.key_char
-                    && !event.keystroke.modifiers.control
-                    && !event.keystroke.modifiers.alt
-                {
-                    self.query.push_str(ch);
+                if self.input.handle_key_down(event, cx) {
+                    self.selected_idx = 0;
                     cx.notify();
                 }
             }
@@ -126,13 +163,7 @@ impl FontPickerModal {
         let target = self.target;
 
         self.state.update(cx, |s, cx| {
-            let slot = match target {
-                FontTargetSlot::Latin => &mut s.config.latin,
-                FontTargetSlot::Script(script) => s.config.script_font_mut(script),
-                FontTargetSlot::LatinItalic => &mut s.config.latin_italic,
-                FontTargetSlot::ScriptItalic(script) => s.config.script_italic_font_mut(script),
-            };
-            *slot = detected;
+            *target.select_mut(&mut s.config) = detected;
             let _ = s.save_config();
             cx.notify();
         });
@@ -148,21 +179,14 @@ impl Render for FontPickerModal {
         }
 
         let theme = self.state.read(cx).theme();
-        let is_focused = self.focus_handle.is_focused(window);
-        let query_lc = self.query.to_ascii_lowercase();
-        let total_matches = self
-            .fonts
-            .iter()
-            .filter(|(name, _)| query_lc.is_empty() || name.to_ascii_lowercase().contains(&query_lc))
-            .count();
-        let filtered: Vec<(String, PathBuf)> = self
-            .fonts
-            .iter()
-            .filter(|(name, _)| query_lc.is_empty() || name.to_ascii_lowercase().contains(&query_lc))
-            .take(150)
-            .cloned()
-            .collect();
-        let show_cursor = is_focused && self.cursor_visible;
+        let is_focused = self.input.focus_handle.is_focused(window);
+        let (total_matches, filtered) = self.filtered_fonts();
+        let selected_idx = self.selected_idx.min(filtered.len().saturating_sub(1));
+        let match_badge = if total_matches > filtered.len() {
+            format!("{}/{} matches", filtered.len(), total_matches)
+        } else {
+            format!("{total_matches} matches")
+        };
 
         div()
             .id("font-picker-backdrop")
@@ -174,7 +198,7 @@ impl Render for FontPickerModal {
             .flex()
             .items_center()
             .justify_center()
-            .track_focus(&self.focus_handle)
+            .track_focus(&self.input.focus_handle)
             .on_key_down(cx.listener(Self::on_key_down))
             .on_mouse_down(
                 MouseButton::Left,
@@ -232,142 +256,95 @@ impl Render for FontPickerModal {
                             ),
                     )
                     .child(
-                        div()
-                            .id("picker-search-box")
-                            .h(px(36.0))
-                            .px(px(10.0))
-                            .rounded(px(6.0))
-                            .bg(theme.surface_2)
-                            .border_1()
-                            .border_color(if is_focused { theme.accent } else { theme.line_2 })
-                            .cursor_text()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, _, window, cx| {
-                                    window.focus(&this.focus_handle);
-                                    this.start_blink(cx);
-                                    cx.stop_propagation();
-                                    cx.notify();
-                                }),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .min_w_0()
-                                    .flex_1()
-                                    .gap(px(8.0))
-                                    .text_sm()
-                                    .text_color(if self.query.is_empty() {
-                                        theme.text_3
-                                    } else {
-                                        theme.text
-                                    })
-                                    .child(
-                                        gpui::svg()
-                                            .path("icons/search.svg")
-                                            .size(px(14.0))
-                                            .text_color(theme.text_3)
-                                            .flex_shrink_0(),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .items_center()
-                                            .min_w_0()
-                                            .when(self.query.is_empty() && show_cursor, |d| {
-                                                d.child(
-                                                    div()
-                                                        .w(px(1.5))
-                                                        .h(px(14.0))
-                                                        .mr(px(2.0))
-                                                        .bg(theme.accent),
-                                                )
-                                            })
-                                            .child(if self.query.is_empty() {
-                                                "Type to filter installed fonts...".to_string()
-                                            } else {
-                                                self.query.clone()
-                                            })
-                                            .when(!self.query.is_empty() && show_cursor, |d| {
-                                                d.child(
-                                                    div()
-                                                        .w(px(1.5))
-                                                        .h(px(14.0))
-                                                        .ml(px(2.0))
-                                                        .bg(theme.accent),
-                                                )
-                                            }),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(theme.text_3)
-                                    .flex_shrink_0()
-                                    .child(if total_matches > filtered.len() {
-                                        format!("{}/{} matches", filtered.len(), total_matches)
-                                    } else {
-                                        format!("{total_matches} matches")
-                                    }),
-                            ),
+                        self.input.render_box(
+                            TextBoxProps {
+                                id: "picker-search-box".into(),
+                                clear_id: "picker-search-clear".into(),
+                                placeholder: "Type to filter installed fonts...",
+                                leading_icon: Some("icons/search.svg"),
+                                trailing_badge: Some(match_badge),
+                                is_focused,
+                                theme,
+                            },
+                            cx.listener(|this, _, window, cx| {
+                                window.focus(&this.input.focus_handle);
+                                this.start_blink(cx);
+                                cx.stop_propagation();
+                                cx.notify();
+                            }),
+                            cx.listener(|this, _, _, cx| {
+                                this.input.clear();
+                                this.selected_idx = 0;
+                                cx.notify();
+                            }),
+                        ),
                     )
                     .child(
                         div()
-                            .id("font-picker-list")
+                            .relative()
                             .flex_1()
                             .min_h_0()
-                            .overflow_y_scroll()
-                            .border_1()
-                            .border_color(theme.line)
-                            .rounded(px(6.0))
-                            .bg(theme.bg)
-                            .p(px(6.0))
                             .flex()
                             .flex_col()
-                            .gap(px(2.0))
-                            .children(filtered.into_iter().enumerate().map(|(idx, (name, path))| {
-                                let name_clone = name.clone();
-                                let path_clone = path.clone();
-                                let file_name = path
-                                    .file_name()
-                                    .map(|f| f.to_string_lossy().to_string())
-                                    .unwrap_or_default();
-
+                            .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify()))
+                            .child(
                                 div()
-                                    .id(("font-row", idx))
-                                    .h(px(34.0))
-                                    .flex_shrink_0()
-                                    .px(px(10.0))
-                                    .gap(px(10.0))
-                                    .rounded(px(4.0))
-                                    .cursor_pointer()
-                                    .hover(|s| s.bg(theme.surface_3))
+                                    .id("font-picker-list")
+                                    .flex_1()
+                                    .min_h_0()
+                                    .overflow_y_scroll()
+                                    .track_scroll(&self.scroll_handle)
+                                    .border_1()
+                                    .border_color(theme.line)
+                                    .rounded(px(6.0))
+                                    .bg(theme.bg)
+                                    .p(px(6.0))
                                     .flex()
-                                    .items_center()
-                                    .justify_between()
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.select_font(name_clone.clone(), path_clone.clone(), cx);
-                                    }))
-                                    .child(
+                                    .flex_col()
+                                    .gap(px(2.0))
+                                    .children(filtered.into_iter().enumerate().map(|(idx, (name, path))| {
+                                        let name_clone = name.clone();
+                                        let path_clone = path.clone();
+                                        let file_name = path
+                                            .file_name()
+                                            .map(|f| f.to_string_lossy().to_string())
+                                            .unwrap_or_default();
+
+                                        let is_row_selected = idx == selected_idx;
                                         div()
-                                            .min_w_0()
-                                            .truncate()
-                                            .text_sm()
-                                            .text_color(theme.text)
-                                            .child(name),
-                                    )
-                                    .child(
-                                        div()
+                                            .id(("font-row", idx))
+                                            .h(px(34.0))
                                             .flex_shrink_0()
-                                            .text_xs()
-                                            .text_color(theme.text_3)
-                                            .child(file_name),
-                                    )
-                            })),
+                                            .px(px(10.0))
+                                            .gap(px(10.0))
+                                            .rounded(px(4.0))
+                                            .when(is_row_selected, |d| d.bg(theme.surface_2))
+                                            .cursor_pointer()
+                                            .hover(|s| s.bg(theme.surface_3))
+                                            .flex()
+                                            .items_center()
+                                            .justify_between()
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.select_font(name_clone.clone(), path_clone.clone(), cx);
+                                            }))
+                                            .child(
+                                                div()
+                                                    .min_w_0()
+                                                    .truncate()
+                                                    .text_sm()
+                                                    .text_color(theme.text)
+                                                    .child(name),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex_shrink_0()
+                                                    .text_xs()
+                                                    .text_color(theme.text_3)
+                                                    .child(file_name),
+                                            )
+                                    })),
+                            )
+                            .child(crate::ui::components::vertical_scrollbar(&self.scroll_handle, theme)),
                     ),
             )
             .into_any_element()

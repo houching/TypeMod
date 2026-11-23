@@ -8,11 +8,15 @@ use crate::ui::components::{ButtonVariant, StatusPill, BadgeTone, VantageButton}
 
 pub struct ResizerView {
     state: Entity<AppState>,
+    scroll_handle: gpui::ScrollHandle,
 }
 
 impl ResizerView {
     pub fn new(state: Entity<AppState>) -> Self {
-        Self { state }
+        Self {
+            state,
+            scroll_handle: gpui::ScrollHandle::new(),
+        }
     }
 
     fn refresh_metrics(&self, cx: &mut Context<Self>) {
@@ -114,10 +118,19 @@ impl Render for ResizerView {
         ];
 
         div()
-            .id("resizer-scroll")
+            .relative()
             .flex_1()
             .min_h_0()
-            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify()))
+            .child(
+                div()
+                    .id("resizer-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.scroll_handle)
             .p(px(20.0))
             .flex()
             .flex_col()
@@ -301,5 +314,7 @@ impl Render for ResizerView {
                             )
                     })),
             )
+            )
+            .child(crate::ui::components::vertical_scrollbar(&self.scroll_handle, theme))
     }
 }
