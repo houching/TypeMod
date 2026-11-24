@@ -1,14 +1,18 @@
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use gpui::{
     Context, Entity, IntoElement, KeyDownEvent, ParentElement, Render, SharedString, Styled, Window,
     div, prelude::*, px,
 };
-use rfd::FileDialog;
+use rfd::AsyncFileDialog;
 
 use crate::app_state::{AppState, FontFamilySelection, NavTab, SecondaryScript};
-use crate::domain::builder::{BuildProgressEvent, find_fontforge, run_build_and_apply};
-use crate::domain::font_discovery::auto_detect_weights;
+use crate::domain::builder::{
+    BuildProgressEvent, apply_built_fonts, has_built_fonts, is_trusted_ffpython_path,
+    resolve_trusted_fontforge, run_build_only,
+};
+use crate::domain::font_discovery::auto_detect_weights_for_style;
 use crate::domain::registry::{are_clones_installed, check_system_state, restore_original_fonts};
 use crate::ui::components::{BadgeTone, ButtonVariant, StatusPill, VantageButton};
 use crate::ui::confirm_modal::{ConfirmModal, ConfirmRequest, prompt_elevated_relaunch};
@@ -41,6 +45,9 @@ pub struct HomeView {
     confirm_modal: Entity<ConfirmModal>,
     script_dropdown_open: bool,
     scroll_handle: gpui::ScrollHandle,
+    path_exists_cache: HashMap<PathBuf, bool>,
+    last_checked_paths: Vec<PathBuf>,
+    exists_check_gen: u64,
 }
 
 struct FontCardProps<'a> {
@@ -65,26 +72,92 @@ impl HomeView {
             confirm_modal,
             script_dropdown_open: false,
             scroll_handle: gpui::ScrollHandle::new(),
+            path_exists_cache: HashMap::new(),
+            last_checked_paths: Vec::new(),
+            exists_check_gen: 0,
         }
     }
 
-    fn browse_regular(&self, slot: FontTargetSlot, cx: &mut Context<Self>) {
+    fn cached_exists(&self, path: &Path) -> bool {
+        self.path_exists_cache.get(path).copied().unwrap_or(true)
+    }
+
+    fn refresh_path_cache(&mut self, force: bool, cx: &mut Context<Self>) {
+        let mut paths = Vec::new();
+        {
+            let cfg = &self.state.read(cx).config;
+            let mut push_sel = |sel: &FontFamilySelection| {
+                for p in [
+                    &sel.regular,
+                    &sel.light,
+                    &sel.semilight,
+                    &sel.semibold,
+                    &sel.bold,
+                    &sel.black,
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    if !paths.contains(p) {
+                        paths.push(p.clone());
+                    }
+                }
+            };
+            push_sel(&cfg.latin);
+            push_sel(&cfg.latin_italic);
+            push_sel(&cfg.khmer);
+            push_sel(&cfg.khmer_italic);
+            for sel in cfg.extra_script_fonts.values() {
+                push_sel(sel);
+            }
+            for sel in cfg.extra_script_italic_fonts.values() {
+                push_sel(sel);
+            }
+        }
+        if !force && paths == self.last_checked_paths {
+            return;
+        }
+        self.last_checked_paths = paths.clone();
+        self.exists_check_gen += 1;
+        let req_gen = self.exists_check_gen;
         cx.spawn(async move |this, cx| {
-            let Some(path) = cx
+            let map = cx
                 .background_executor()
                 .spawn(async move {
-                    FileDialog::new()
-                        .add_filter("Font Files", &["ttf", "otf"])
-                        .pick_file()
+                    paths
+                        .into_iter()
+                        .map(|p| {
+                            let ok = p.exists();
+                            (p, ok)
+                        })
+                        .collect::<HashMap<PathBuf, bool>>()
                 })
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                if view.exists_check_gen == req_gen {
+                    view.path_exists_cache = map;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn browse_regular(&self, slot: FontTargetSlot, cx: &mut Context<Self>) {
+        let is_italic = slot.is_italic();
+        cx.spawn(async move |this, cx| {
+            let Some(path) = AsyncFileDialog::new()
+                .add_filter("Font Files", &["ttf", "otf"])
+                .pick_file()
                 .await
+                .map(|h| h.path().to_path_buf())
             else {
                 return;
             };
 
             let detected = cx
                 .background_executor()
-                .spawn(async move { auto_detect_weights(&path, None, &[]) })
+                .spawn(async move { auto_detect_weights_for_style(&path, None, &[], is_italic) })
                 .await;
 
             let _ = this.update(cx, |view, cx| {
@@ -97,6 +170,7 @@ impl HomeView {
                     let _ = s.save_config();
                     cx.notify();
                 });
+                view.refresh_path_cache(true, cx);
             });
         })
         .detach();
@@ -104,14 +178,11 @@ impl HomeView {
 
     fn browse_weight(&self, slot: FontTargetSlot, weight: WeightKind, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
-            let Some(path) = cx
-                .background_executor()
-                .spawn(async move {
-                    FileDialog::new()
-                        .add_filter("Font Files", &["ttf", "otf"])
-                        .pick_file()
-                })
+            let Some(path) = AsyncFileDialog::new()
+                .add_filter("Font Files", &["ttf", "otf"])
+                .pick_file()
                 .await
+                .map(|h| h.path().to_path_buf())
             else {
                 return;
             };
@@ -156,8 +227,11 @@ impl HomeView {
         });
     }
 
-    fn build_and_apply(&self, window: &mut Window, cx: &mut Context<Self>) {
+    fn build_fonts(&self, cx: &mut Context<Self>) {
         let s = self.state.read(cx);
+        if s.is_busy {
+            return;
+        }
         if !s.config.latin.has_regular() {
             self.state.update(cx, |s, cx| {
                 s.last_error = Some("Please select at least a Primary English / Latin Regular font.".to_string());
@@ -166,33 +240,8 @@ impl HomeView {
             return;
         }
 
-        if !s.is_admin {
-            prompt_elevated_relaunch(
-                self.state.clone(),
-                &self.confirm_modal,
-                "Modifying Windows system fonts requires Administrator privileges. Relaunch elevated now?",
-                window,
-                cx,
-            );
-            return;
-        }
-
-        let Some(ff_exe) = s
-            .fontforge_path
-            .clone()
-            .or_else(|| s.config.custom_fontforge_path.clone().filter(|p| p.exists()))
-            .or_else(find_fontforge)
-        else {
-            self.state.update(cx, |s, cx| {
-                s.last_error = Some(
-                    "FontForge not found. Open Settings -> Install via winget to install FontForge."
-                        .to_string(),
-                );
-                cx.notify();
-            });
-            return;
-        };
-
+        let cached_ff = s.fontforge_path.clone();
+        let custom_ff = s.config.custom_fontforge_path.clone();
         let cfg = s.config.clone();
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let cancel_worker = cancel.clone();
@@ -209,42 +258,49 @@ impl HomeView {
 
         enum WorkerMsg {
             Progress(BuildProgressEvent),
-            Done(anyhow::Result<()>),
+            Done {
+                res: anyhow::Result<usize>,
+                built_ready: bool,
+                ff_resolved: Option<PathBuf>,
+            },
         }
 
         let state = self.state.clone();
         let (tx, rx) = std::sync::mpsc::channel::<WorkerMsg>();
 
-        cx.spawn(async move |_this, cx| {
+        cx.spawn(async move |this, cx| {
             let tx_done = tx.clone();
             cx.background_executor()
                 .spawn(async move {
-                    let res = run_build_and_apply(&cfg, &ff_exe, &cancel_worker, |ev| {
-                        let _ = tx.send(WorkerMsg::Progress(ev));
+                    let ff_opt = cached_ff
+                        .filter(|p| is_trusted_ffpython_path(p))
+                        .or_else(|| resolve_trusted_fontforge(custom_ff.as_deref()));
+                    let res = match &ff_opt {
+                        Some(ff_exe) => run_build_only(&cfg, ff_exe, &cancel_worker, |ev| {
+                            let _ = tx.send(WorkerMsg::Progress(ev));
+                        }),
+                        None => Err(anyhow::anyhow!(
+                            "FontForge not found. Open Settings -> Install via winget to install FontForge."
+                        )),
+                    };
+                    let built_ready = has_built_fonts();
+                    let _ = tx_done.send(WorkerMsg::Done {
+                        res,
+                        built_ready,
+                        ff_resolved: ff_opt,
                     });
-                    let _ = tx_done.send(WorkerMsg::Done(res));
                 })
                 .detach();
 
-            let mut final_res: Option<anyhow::Result<()>> = None;
+            let mut done_msg: Option<WorkerMsg> = None;
             loop {
+                let mut batch: Vec<BuildProgressEvent> = Vec::new();
                 let mut disconnected = false;
                 loop {
                     match rx.try_recv() {
-                        Ok(WorkerMsg::Progress(ev)) => {
-                            let _ = state.update(cx, |s, cx| {
-                                match ev {
-                                    BuildProgressEvent::Step { progress, status } => {
-                                        s.progress = progress;
-                                        s.status_text = status;
-                                    }
-                                    BuildProgressEvent::Log(line) => s.push_log(line),
-                                }
-                                cx.notify();
-                            });
-                        }
-                        Ok(WorkerMsg::Done(res)) => {
-                            final_res = Some(res);
+                        Ok(WorkerMsg::Progress(ev)) => batch.push(ev),
+                        Ok(done @ WorkerMsg::Done { .. }) => {
+                            done_msg = Some(done);
                         }
                         Err(std::sync::mpsc::TryRecvError::Empty) => break,
                         Err(std::sync::mpsc::TryRecvError::Disconnected) => {
@@ -253,19 +309,27 @@ impl HomeView {
                         }
                     }
                 }
-                if final_res.is_some() {
-                    break;
+                if !batch.is_empty() {
+                    let _ = state.update(cx, |s, cx| {
+                        for ev in batch {
+                            match ev {
+                                BuildProgressEvent::Step { progress, status } => {
+                                    s.progress = progress;
+                                    s.status_text = status;
+                                }
+                                BuildProgressEvent::Log(line) => s.push_log(line),
+                            }
+                        }
+                        cx.notify();
+                    });
                 }
-                if disconnected {
-                    final_res = Some(Err(anyhow::anyhow!("Build worker terminated unexpectedly.")));
+                if done_msg.is_some() || disconnected {
                     break;
                 }
                 cx.background_executor()
                     .timer(std::time::Duration::from_millis(80))
                     .await;
             }
-
-            let res = final_res.unwrap_or_else(|| Err(anyhow::anyhow!("Build cancelled")));
 
             let _ = state.update(cx, |s, cx| {
                 let was_cancelled = s
@@ -274,31 +338,143 @@ impl HomeView {
                     .is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed));
                 s.is_busy = false;
                 s.cancel_flag = None;
-                s.system_state = check_system_state();
-                s.clones_installed = are_clones_installed();
-                match res {
-                    Ok(()) => {
-                        s.progress = 1.0;
-                        s.status_text = "Success! Reboot required to apply changes.".to_string();
-                        s.last_notice = Some(
-                            "Success! REBOOT REQUIRED to apply system-wide font changes."
-                                .to_string(),
-                        );
+                match done_msg {
+                    Some(WorkerMsg::Done {
+                        res,
+                        built_ready,
+                        ff_resolved,
+                    }) => {
+                        s.has_built_fonts = built_ready;
+                        if ff_resolved.is_some() {
+                            s.fontforge_path = ff_resolved;
+                        }
+                        match res {
+                            Ok(count) => {
+                                s.built_revision = s.built_revision.wrapping_add(1);
+                                s.progress = 1.0;
+                                s.status_text = format!(
+                                    "Built {count} fonts! Preview them or click Apply to Windows."
+                                );
+                                s.last_notice = Some(format!(
+                                    "Built {count} fonts. Check them in Preview, then click Apply to Windows when ready."
+                                ));
+                            }
+                            Err(_) if was_cancelled => {
+                                s.progress = 0.0;
+                                s.status_text = "Cancelled".to_string();
+                                s.last_notice = Some(
+                                    "Build cancelled. No Windows system fonts were modified."
+                                        .to_string(),
+                                );
+                            }
+                            Err(e) => {
+                                s.status_text = "Build failed".to_string();
+                                s.last_error = Some(e.to_string());
+                            }
+                        }
                     }
-                    Err(_) if was_cancelled => {
-                        s.progress = 0.0;
-                        s.status_text = "Cancelled".to_string();
-                        s.last_notice = Some("Build cancelled before modifying Windows Fonts.".to_string());
-                    }
-                    Err(e) => {
+                    _ => {
                         s.status_text = "Build failed".to_string();
-                        s.last_error = Some(e.to_string());
+                        s.last_error =
+                            Some("Build worker terminated unexpectedly.".to_string());
                     }
                 }
                 cx.notify();
             });
+            let _ = this.update(cx, |view, cx| view.refresh_path_cache(true, cx));
         })
         .detach();
+    }
+
+    fn apply_fonts(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let s = self.state.read(cx);
+        if s.is_busy {
+            return;
+        }
+        if !s.has_built_fonts {
+            self.state.update(cx, |s, cx| {
+                s.last_error = Some("No built fonts found. Run Step 1 (Build Fonts) first.".to_string());
+                cx.notify();
+            });
+            return;
+        }
+        if !s.is_admin {
+            prompt_elevated_relaunch(
+                self.state.clone(),
+                &self.confirm_modal,
+                "Applying built fonts to Windows requires Administrator privileges. Your built fonts are already saved—relaunch elevated to apply them now?",
+                window,
+                cx,
+            );
+            return;
+        }
+
+        let state_handle = self.state.clone();
+        self.confirm_modal.update(cx, |m, cx| {
+            m.open(
+                ConfirmRequest {
+                    title: "Apply Built Fonts to Windows".to_string(),
+                    message: "Install the built replacement fonts into Windows and update the Segoe UI Registry entries? A reboot will be required to apply system-wide.".to_string(),
+                    confirm_label: "Apply to Windows".to_string(),
+                    dangerous: false,
+                    on_cancel: None,
+                    on_confirm: Box::new(move |_, cx| {
+                        let (cfg, ff_exe) = {
+                            let s = state_handle.read(cx);
+                            if s.is_busy {
+                                return;
+                            }
+                            (s.config.clone(), s.fontforge_path.clone())
+                        };
+                        state_handle.update(cx, |s, cx| {
+                            s.is_busy = true;
+                            s.progress = 0.10;
+                            s.status_text = "Applying built fonts to Windows...".to_string();
+                            s.last_error = None;
+                            s.last_notice = None;
+                            cx.notify();
+                        });
+
+                        let state_bg = state_handle.clone();
+                        cx.spawn(async move |cx| {
+                            let (res, sys_state, clones) = cx
+                                .background_executor()
+                                .spawn(async move {
+                                    let res = apply_built_fonts(&cfg, ff_exe.as_deref(), |_| {});
+                                    let sys_state = check_system_state();
+                                    let clones = are_clones_installed();
+                                    (res, sys_state, clones)
+                                })
+                                .await;
+                            let _ = state_bg.update(cx, |s, cx| {
+                                s.is_busy = false;
+                                s.system_state = sys_state;
+                                s.clones_installed = clones;
+                                match res {
+                                    Ok(count) => {
+                                        s.progress = 1.0;
+                                        s.status_text =
+                                            "Applied! Reboot required to apply changes."
+                                                .to_string();
+                                        s.last_notice = Some(format!(
+                                            "Applied {count} fonts! REBOOT REQUIRED to apply system-wide font changes."
+                                        ));
+                                    }
+                                    Err(e) => {
+                                        s.status_text = "Apply failed".to_string();
+                                        s.last_error = Some(format!("Apply failed: {e}"));
+                                    }
+                                }
+                                cx.notify();
+                            });
+                        })
+                        .detach();
+                    }),
+                },
+                window,
+                cx,
+            );
+        });
     }
 
     fn cancel_build(&self, cx: &mut Context<Self>) {
@@ -313,6 +489,9 @@ impl HomeView {
 
     fn restore_system(&self, window: &mut Window, cx: &mut Context<Self>) {
         let s = self.state.read(cx);
+        if s.is_busy {
+            return;
+        }
         if !s.is_admin {
             prompt_elevated_relaunch(
                 self.state.clone(),
@@ -328,6 +507,9 @@ impl HomeView {
         let state_handle = self.state.clone();
         let confirm_modal = self.confirm_modal.clone();
         let run_restore = move |delete_clones: bool, cx: &mut gpui::App| {
+            if state_handle.read(cx).is_busy {
+                return;
+            }
             let state_bg = state_handle.clone();
             state_handle.update(cx, |s, cx| {
                 s.is_busy = true;
@@ -336,16 +518,21 @@ impl HomeView {
                 cx.notify();
             });
             cx.spawn(async move |cx| {
-                let res = cx
+                let (res, sys_state, clones) = cx
                     .background_executor()
-                    .spawn(async move { restore_original_fonts(delete_clones) })
+                    .spawn(async move {
+                        let res = restore_original_fonts(delete_clones);
+                        let sys_state = check_system_state();
+                        let clones = are_clones_installed();
+                        (res, sys_state, clones)
+                    })
                     .await;
                 let _ = state_bg.update(cx, |s, cx| {
                     s.is_busy = false;
                     match res {
                         Ok(()) => {
-                            s.system_state = check_system_state();
-                            s.clones_installed = are_clones_installed();
+                            s.system_state = sys_state;
+                            s.clones_installed = clones;
                             s.last_error = None;
                             s.last_notice = Some(
                                 "Restored stock Segoe UI registry entries. REBOOT REQUIRED to finalize."
@@ -362,6 +549,7 @@ impl HomeView {
             .detach();
         };
 
+        let run_restore_cancel = run_restore.clone();
         self.confirm_modal.update(cx, |m, cx| {
             m.open(
                 ConfirmRequest {
@@ -369,9 +557,12 @@ impl HomeView {
                     message: "This will reset all Segoe UI Registry entries back to stock Windows defaults. Proceed?".to_string(),
                     confirm_label: "Restore".to_string(),
                     dangerous: true,
+                    on_cancel: None,
                     on_confirm: Box::new(move |window, cx| {
                         if has_clones {
                             let modal = confirm_modal.clone();
+                            let run_yes = run_restore.clone();
+                            let run_keep = run_restore_cancel.clone();
                             window.defer(cx, move |window, cx| {
                                 modal.update(cx, |m2, cx| {
                                     m2.open(
@@ -380,7 +571,8 @@ impl HomeView {
                                             message: "Segoe UI Clone fonts are installed. Do you want to remove them as well? (Press Cancel to keep clones and still restore.)".to_string(),
                                             confirm_label: "Remove Clones".to_string(),
                                             dangerous: true,
-                                            on_confirm: Box::new(move |_, cx| run_restore(true, cx)),
+                                            on_confirm: Box::new(move |_, cx| run_yes(true, cx)),
+                                            on_cancel: Some(Box::new(move |_, cx| run_keep(false, cx))),
                                         },
                                         window,
                                         cx,
@@ -428,18 +620,21 @@ impl HomeView {
             (WeightKind::Black, &sel.black),
         ];
 
+        let regular_present = sel.regular.as_ref().is_some_and(|p| self.cached_exists(p));
+        let missing_regular = sel.regular.is_some() && !regular_present;
+
         let detected_count = [
-            sel.regular.is_some(),
-            sel.light.is_some(),
-            sel.semilight.is_some(),
-            sel.semibold.is_some(),
-            sel.bold.is_some(),
-            sel.black.is_some(),
+            &sel.regular,
+            &sel.light,
+            &sel.semilight,
+            &sel.semibold,
+            &sel.bold,
+            &sel.black,
         ]
         .into_iter()
-        .filter(|&x| x)
+        .filter(|opt| opt.as_ref().is_some_and(|p| self.cached_exists(p)))
         .count();
-        let weight_summary = if sel.is_variable || !sel.has_regular() {
+        let weight_summary = if sel.is_variable || !regular_present {
             String::new()
         } else {
             format!("{detected_count}/6 weights")
@@ -482,6 +677,9 @@ impl HomeView {
                                     .when(sel.is_variable, |d| {
                                         d.child(StatusPill::new("VARIABLE", BadgeTone::Accent, theme))
                                     })
+                                    .when(missing_regular, |d| {
+                                        d.child(StatusPill::new("MISSING FILE", BadgeTone::Err, theme))
+                                    })
                                     .when(!weight_summary.is_empty(), |d| {
                                         d.child(StatusPill::new(weight_summary, BadgeTone::Ok, theme))
                                     }),
@@ -517,7 +715,7 @@ impl HomeView {
                                     this.open_system_picker(slot, window, cx)
                                 })),
                             )
-                            .when(sel.has_regular(), |d| {
+                            .when(sel.regular.is_some(), |d| {
                                 d.child(
                                     VantageButton::new(
                                         gpui::SharedString::from(format!("clr-{title}")),
@@ -565,8 +763,10 @@ impl HomeView {
                         div()
                             .min_w_0()
                             .text_xs()
-                            .text_color(if sel.has_regular() {
+                            .text_color(if regular_present {
                                 theme.text
+                            } else if missing_regular {
+                                theme.err
                             } else {
                                 theme.text_3
                             })
@@ -589,7 +789,8 @@ impl HomeView {
                         .flex_wrap()
                         .gap(px(6.0))
                         .children(weights.into_iter().map(|(w, path_opt)| {
-                            let detected = path_opt.is_some();
+                            let detected =
+                                path_opt.as_ref().is_some_and(|p| self.cached_exists(p));
                             let w_label = if let Some(p) = path_opt {
                                 format!(
                                     "{}: {}",
@@ -623,21 +824,68 @@ impl HomeView {
 
 impl Render for HomeView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let s = self.state.read(cx);
-        let theme = s.theme();
-        let cfg = s.config.clone();
-        let is_busy = s.is_busy;
-        let progress = s.progress.clamp(0.0, 1.0);
-        let status_text = s.status_text.clone();
+        self.refresh_path_cache(false, cx);
 
-        let active_scripts = cfg.active_scripts();
-        let script_name = cfg.active_scripts_summary();
-        let ff_ready = s.fontforge_path.is_some()
-            || s.config
-                .custom_fontforge_path
-                .as_ref()
-                .is_some_and(|p| p.exists());
-        let can_build = !is_busy && cfg.latin.has_regular();
+        let (
+            theme,
+            is_busy,
+            has_built,
+            progress,
+            status_text,
+            active_scripts,
+            script_name,
+            ff_ready,
+            enable_italic,
+            merging_mode_label,
+            latin_sel,
+            latin_italic_sel,
+            base_script_sels,
+            italic_script_sels,
+        ) = {
+            let s = self.state.read(cx);
+            let active_scripts = s.config.active_scripts();
+            let base_script_sels: Vec<(SecondaryScript, FontFamilySelection)> = active_scripts
+                .iter()
+                .map(|&sc| (sc, s.config.script_font(sc).cloned().unwrap_or_default()))
+                .collect();
+            let italic_script_sels: Vec<(SecondaryScript, FontFamilySelection)> =
+                if s.config.enable_italic {
+                    active_scripts
+                        .iter()
+                        .map(|&sc| {
+                            (
+                                sc,
+                                s.config.script_italic_font(sc).cloned().unwrap_or_default(),
+                            )
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+            let ff_ready = s.fontforge_path.is_some()
+                || s.config
+                    .custom_fontforge_path
+                    .as_ref()
+                    .is_some_and(|p| self.cached_exists(p));
+            (
+                s.theme(),
+                s.is_busy,
+                s.has_built_fonts,
+                s.progress.clamp(0.0, 1.0),
+                s.status_text.clone(),
+                active_scripts,
+                s.config.active_scripts_summary(),
+                ff_ready,
+                s.config.enable_italic,
+                s.config.merging_mode.label(),
+                s.config.latin.clone(),
+                s.config.latin_italic.clone(),
+                base_script_sels,
+                italic_script_sels,
+            )
+        };
+        let can_build =
+            !is_busy && latin_sel.regular.as_ref().is_some_and(|p| self.cached_exists(p));
         let pct_label = format!("{}%", (progress * 100.0).round() as u32);
 
         let dropdown_open = self.script_dropdown_open;
@@ -723,12 +971,14 @@ impl Render for HomeView {
             .into_any_element();
 
         let mut script_selector_opt = Some(script_selector_row);
-        let mut base_script_cards = Vec::with_capacity(active_scripts.len());
-        for (idx, &script) in active_scripts.iter().enumerate() {
+        let mut base_script_cards = Vec::with_capacity(base_script_sels.len());
+        for (idx, (script, script_sel)) in base_script_sels.iter().enumerate() {
             let s_name = script.label();
-            let script_sel = cfg.script_font(script).cloned().unwrap_or_default();
-            let script_same_as_latin =
-                script_sel.has_regular() && script_sel.regular == cfg.latin.regular;
+            let script_same_as_latin = script_sel
+                .regular
+                .as_ref()
+                .is_some_and(|p| self.cached_exists(p))
+                && script_sel.regular == latin_sel.regular;
             let title = if idx == 0 {
                 format!("2. {s_name} Base Font (Optional)")
             } else {
@@ -741,8 +991,8 @@ impl Render for HomeView {
                         "Optional {s_name} font merged with OpenType shaping (GSUB/GPOS)."
                     )
                     .into(),
-                    slot: FontTargetSlot::Script(script),
-                    sel: &script_sel,
+                    slot: FontTargetSlot::Script(*script),
+                    sel: script_sel,
                     is_busy,
                     extra_header_row: if idx == 0 {
                         script_selector_opt.take()
@@ -759,32 +1009,29 @@ impl Render for HomeView {
             ));
         }
 
-        let mut italic_script_cards = Vec::new();
-        if cfg.enable_italic {
-            for (idx, &script) in active_scripts.iter().enumerate() {
-                let s_name = script.label();
-                let script_ital_sel = cfg.script_italic_font(script).cloned().unwrap_or_default();
-                let title = if idx == 0 {
-                    format!("4. {s_name} Italic / Oblique Font (Optional)")
-                } else {
-                    format!("4.{} {s_name} Italic / Oblique Font (Optional)", idx + 1)
-                };
-                italic_script_cards.push(self.render_font_card(
-                    FontCardProps {
-                        title: title.into(),
-                        subtitle: format!(
-                            "Optional {s_name} italic weights merged into Segoe UI Italic."
-                        )
-                        .into(),
-                        slot: FontTargetSlot::ScriptItalic(script),
-                        sel: &script_ital_sel,
-                        is_busy,
-                        extra_header_row: None,
-                        extra_note: None,
-                    },
-                    cx,
-                ));
-            }
+        let mut italic_script_cards = Vec::with_capacity(italic_script_sels.len());
+        for (idx, (script, script_ital_sel)) in italic_script_sels.iter().enumerate() {
+            let s_name = script.label();
+            let title = if idx == 0 {
+                format!("4. {s_name} Italic / Oblique Font (Optional)")
+            } else {
+                format!("4.{} {s_name} Italic / Oblique Font (Optional)", idx + 1)
+            };
+            italic_script_cards.push(self.render_font_card(
+                FontCardProps {
+                    title: title.into(),
+                    subtitle: format!(
+                        "Optional {s_name} italic weights merged into Segoe UI Italic."
+                    )
+                    .into(),
+                    slot: FontTargetSlot::ScriptItalic(*script),
+                    sel: script_ital_sel,
+                    is_busy,
+                    extra_header_row: None,
+                    extra_note: None,
+                },
+                cx,
+            ));
         }
 
         div()
@@ -845,7 +1092,7 @@ impl Render for HomeView {
                     subtitle: "Required base font for Latin UI text, digits, and punctuation."
                         .into(),
                     slot: FontTargetSlot::Latin,
-                    sel: &cfg.latin,
+                    sel: &latin_sel,
                     is_busy,
                     extra_header_row: None,
                     extra_note: None,
@@ -853,7 +1100,7 @@ impl Render for HomeView {
                 cx,
             ))
             .children(base_script_cards)
-            .when(cfg.enable_italic, |d| {
+            .when(enable_italic, |d| {
                 d.child(self.render_font_card(
                     FontCardProps {
                         title: "3. Latin Italic Font".into(),
@@ -861,7 +1108,7 @@ impl Render for HomeView {
                             "Optional Italic weights (6 variants) when Italic replacement is enabled."
                                 .into(),
                         slot: FontTargetSlot::LatinItalic,
-                        sel: &cfg.latin_italic,
+                        sel: &latin_italic_sel,
                         is_busy,
                         extra_header_row: None,
                         extra_note: None,
@@ -909,10 +1156,17 @@ impl Render for HomeView {
                                             )
                                             .child(StatusPill::new(pct_label, BadgeTone::Accent, theme))
                                             .child(StatusPill::new(
-                                                cfg.merging_mode.label(),
+                                                merging_mode_label,
                                                 BadgeTone::Neutral,
                                                 theme,
                                             ))
+                                            .when(has_built, |d| {
+                                                d.child(StatusPill::new(
+                                                    "BUILT READY",
+                                                    BadgeTone::Ok,
+                                                    theme,
+                                                ))
+                                            })
                                             .when(!ff_ready, |d| {
                                                 d.child(
                                                     VantageButton::new(
@@ -958,12 +1212,39 @@ impl Render for HomeView {
                                         )
                                     })
                                     .child(
-                                        VantageButton::new("build-btn", "Build & Apply", theme)
+                                        VantageButton::new("build-btn", "1. Build Fonts", theme)
                                             .icon("icons/play.svg")
-                                            .variant(ButtonVariant::Primary)
+                                            .variant(if has_built {
+                                                ButtonVariant::Secondary
+                                            } else {
+                                                ButtonVariant::Primary
+                                            })
                                             .disabled(!can_build)
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.build_fonts(cx)
+                                            })),
+                                    )
+                                    .when(has_built && !is_busy, |d| {
+                                        d.child(
+                                            VantageButton::new("preview-built-btn", "Preview Built", theme)
+                                                .icon("icons/eye.svg")
+                                                .variant(ButtonVariant::Secondary)
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.state.update(cx, |s, cx| {
+                                                        s.preview_built_requested = true;
+                                                        s.active_tab = NavTab::Preview;
+                                                        cx.notify();
+                                                    });
+                                                })),
+                                        )
+                                    })
+                                    .child(
+                                        VantageButton::new("apply-btn", "2. Apply to Windows", theme)
+                                            .icon("icons/shield-check.svg")
+                                            .variant(ButtonVariant::Primary)
+                                            .disabled(is_busy || !has_built)
                                             .on_click(cx.listener(|this, _, window, cx| {
-                                                this.build_and_apply(window, cx)
+                                                this.apply_fonts(window, cx)
                                             })),
                                     ),
                             ),

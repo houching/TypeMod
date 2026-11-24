@@ -1,40 +1,47 @@
 use std::fs;
-use std::io::Read;
 use std::path::{Path, PathBuf};
+
+use read_fonts::{FontRef, TableProvider, types::Tag};
 
 use crate::app_state::FontFamilySelection;
 
+const MAX_FONT_BYTES: u64 = 64 * 1024 * 1024;
+
 pub fn is_variable_font(path: &Path) -> bool {
-    let Ok(mut file) = fs::File::open(path) else {
+    let Ok(meta) = fs::metadata(path) else {
         return false;
     };
-    let mut header = [0u8; 12];
-    if file.read_exact(&mut header).is_err() {
+    if !meta.is_file() || meta.len() > MAX_FONT_BYTES {
         return false;
     }
-    let sfnt = &header[..4];
-    if sfnt != [0x00, 0x01, 0x00, 0x00] && sfnt != b"OTTO" && sfnt != b"true" {
+    let Ok(bytes) = fs::read(path) else {
         return false;
-    }
-    let num_tables = u16::from_be_bytes([header[4], header[5]]) as usize;
-    if num_tables == 0 || num_tables > 512 {
+    };
+    let Ok(font) = FontRef::new(&bytes) else {
         return false;
-    }
-    let mut directory = vec![0u8; num_tables * 16];
-    if file.read_exact(&mut directory).is_err() {
+    };
+    let Ok(fvar) = font.fvar() else {
         return false;
-    }
-    directory
-        .as_chunks::<16>()
-        .0
-        .iter()
-        .any(|rec| &rec[..4] == b"fvar")
+    };
+    let Ok(axes) = fvar.axes() else {
+        return false;
+    };
+    axes.iter().any(|a| a.axis_tag() == Tag::new(b"wght"))
 }
 
 pub fn auto_detect_weights(
     reg_path: &Path,
     reg_name: Option<&str>,
     installed_fonts: &[(String, PathBuf)],
+) -> FontFamilySelection {
+    auto_detect_weights_for_style(reg_path, reg_name, installed_fonts, false)
+}
+
+pub fn auto_detect_weights_for_style(
+    reg_path: &Path,
+    reg_name: Option<&str>,
+    installed_fonts: &[(String, PathBuf)],
+    expect_italic: bool,
 ) -> FontFamilySelection {
     let mut sel = FontFamilySelection {
         regular: Some(reg_path.to_path_buf()),
@@ -55,46 +62,52 @@ pub fn auto_detect_weights(
         && let Ok(entries) = fs::read_dir(dir)
     {
         let stem_base = extract_family_stem(reg_path);
-        let files: Vec<PathBuf> = entries
-            .filter_map(|e| e.ok().map(|x| x.path()))
-            .filter(|p| {
-                p.extension()
-                    .and_then(|e| e.to_str())
-                    .is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "ttf" | "otf"))
-            })
-            .collect();
+        if !stem_base.is_empty() {
+            let files: Vec<PathBuf> = entries
+                .filter_map(|e| e.ok().map(|x| x.path()))
+                .filter(|p| {
+                    p.extension()
+                        .and_then(|e| e.to_str())
+                        .is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "ttf" | "otf"))
+                })
+                .collect();
 
-        for path in &files {
-            if path == reg_path {
-                continue;
-            }
-            let name_lc = path
-                .file_stem()
-                .map(|s| s.to_string_lossy().to_ascii_lowercase())
-                .unwrap_or_default();
+            for path in &files {
+                if path == reg_path {
+                    continue;
+                }
+                let name_lc = path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().to_ascii_lowercase())
+                    .unwrap_or_default();
 
-            if !stem_base.is_empty() && !matches_family_prefix(&name_lc, &stem_base) {
-                continue;
-            }
-            if name_lc.contains("italic") || name_lc.contains("oblique") {
-                continue;
-            }
+                let Some(suffix_lc) = strip_family_prefix(&name_lc, &stem_base) else {
+                    continue;
+                };
+                let is_italic = name_lc.contains("italic") || name_lc.contains("oblique");
+                if is_italic != expect_italic {
+                    continue;
+                }
 
-            assign_weight_by_name(&mut sel, &name_lc, path);
+                assign_weight_by_name(&mut sel, suffix_lc, path);
+            }
         }
     }
 
     if let Some(base_name) = reg_name {
         let family = strip_weight_suffix(base_name).to_ascii_lowercase();
-        for (name, path) in installed_fonts {
-            let name_lc = name.to_ascii_lowercase();
-            if !matches_family_prefix(&name_lc, &family) {
-                continue;
+        if !family.is_empty() {
+            for (name, path) in installed_fonts {
+                let name_lc = name.to_ascii_lowercase();
+                let Some(suffix_lc) = strip_family_prefix(&name_lc, &family) else {
+                    continue;
+                };
+                let is_italic = name_lc.contains("italic") || name_lc.contains("oblique");
+                if is_italic != expect_italic {
+                    continue;
+                }
+                assign_weight_by_name(&mut sel, suffix_lc, path);
             }
-            if name_lc.contains("italic") || name_lc.contains("oblique") {
-                continue;
-            }
-            assign_weight_by_name(&mut sel, &name_lc, path);
         }
     }
 
@@ -102,11 +115,17 @@ pub fn auto_detect_weights(
 }
 
 fn extract_family_stem(path: &Path) -> String {
-    let stem = path
+    let mut stem = path
         .file_stem()
         .map(|s| s.to_string_lossy().to_ascii_lowercase())
         .unwrap_or_default();
     for suffix in [
+        "-italic",
+        "_italic",
+        " italic",
+        "-oblique",
+        "_oblique",
+        " oblique",
         "-regular",
         "_regular",
         " regular",
@@ -114,9 +133,12 @@ fn extract_family_stem(path: &Path) -> String {
         "_variable",
         "variable",
         "regular",
+        "italic",
+        "oblique",
     ] {
         if let Some(stripped) = stem.strip_suffix(suffix) {
-            return stripped.trim_end_matches(['-', '_', ' ']).to_string();
+            stem = stripped.trim_end_matches(['-', '_', ' ']).to_string();
+            break;
         }
     }
     stem
@@ -124,32 +146,40 @@ fn extract_family_stem(path: &Path) -> String {
 
 fn strip_weight_suffix(name: &str) -> String {
     let mut out = name.trim().to_string();
-    for suffix in [
-        " Regular",
-        " Light",
-        " Semilight",
-        " SemiLight",
-        " Semibold",
-        " SemiBold",
-        " Bold",
-        " Black",
-    ] {
-        if let Some(s) = out.strip_suffix(suffix) {
-            out = s.to_string();
+    loop {
+        let mut changed = false;
+        for suffix in [
+            " Oblique",
+            " Italic",
+            " Regular",
+            " Light",
+            " Semilight",
+            " SemiLight",
+            " Semibold",
+            " SemiBold",
+            " Bold",
+            " Black",
+        ] {
+            if let Some(s) = out.strip_suffix(suffix) {
+                out = s.trim_end().to_string();
+                changed = true;
+                break;
+            }
+        }
+        if !changed {
             break;
         }
     }
     out
 }
 
-fn matches_family_prefix(candidate_lc: &str, family_lc: &str) -> bool {
-    if family_lc.is_empty() {
-        return true;
+fn strip_family_prefix<'a>(candidate_lc: &'a str, family_lc: &str) -> Option<&'a str> {
+    let rest = candidate_lc.strip_prefix(family_lc)?;
+    if rest.is_empty() || rest.starts_with(['-', '_', ' ']) {
+        Some(rest)
+    } else {
+        None
     }
-    let Some(rest) = candidate_lc.strip_prefix(family_lc) else {
-        return false;
-    };
-    rest.is_empty() || rest.starts_with(['-', '_', ' '])
 }
 
 fn assign_weight_by_name(sel: &mut FontFamilySelection, name_lc: &str, path: &Path) {
@@ -218,5 +248,36 @@ mod tests {
         if var_segoe.exists() {
             assert!(is_variable_font(var_segoe));
         }
+    }
+
+    #[test]
+    fn detects_italic_weights_and_avoids_family_keyword_collisions() {
+        let dir = std::env::temp_dir().join(format!("segoeui_fd_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let reg = dir.join("Highlight-Regular.ttf");
+        let med = dir.join("Highlight-Medium.ttf");
+        let bold = dir.join("Highlight-Bold.ttf");
+        let ital = dir.join("Highlight-Italic.ttf");
+        let bold_ital = dir.join("Highlight-BoldItalic.ttf");
+        for p in [&reg, &med, &bold, &ital, &bold_ital] {
+            std::fs::write(p, b"").unwrap();
+        }
+
+        let norm = auto_detect_weights_for_style(&reg, Some("Highlight"), &[], false);
+        assert!(norm.light.is_none(), "Highlight-Medium must not match light");
+        assert_eq!(norm.bold.as_deref(), Some(bold.as_path()));
+
+        let it = auto_detect_weights_for_style(&ital, Some("Highlight Italic"), &[], true);
+        assert_eq!(it.bold.as_deref(), Some(bold_ital.as_path()));
+
+        // Empty family stem ("Regular.ttf") must not match random siblings
+        let empty_stem = dir.join("Regular.ttf");
+        std::fs::write(&empty_stem, b"").unwrap();
+        let empty_sel = auto_detect_weights_for_style(&empty_stem, None, &[], false);
+        assert!(empty_sel.bold.is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

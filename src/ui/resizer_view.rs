@@ -93,9 +93,18 @@ impl ResizerView {
     }
 
     fn apply_individual(&self, cx: &mut Context<Self>) {
-        let sizes: SystemFontSizes = self.state.read(cx).sizes.clone();
+        let raw = &self.state.read(cx).sizes;
+        let sizes = SystemFontSizes {
+            caption: raw.caption.clamp(6, 24),
+            sm_caption: raw.sm_caption.clamp(6, 24),
+            menu: raw.menu.clamp(6, 24),
+            status: raw.status.clamp(6, 24),
+            message: raw.message.clamp(6, 24),
+            icon: raw.icon.clamp(6, 24),
+        };
         let state = self.state.clone();
         cx.spawn(async move |_, cx| {
+            let applied_sizes = sizes.clone();
             let res = cx
                 .background_executor()
                 .spawn(async move { resizer::apply_system_metrics(&sizes) })
@@ -103,6 +112,7 @@ impl ResizerView {
             let _ = state.update(cx, |s, cx| {
                 match res {
                     Ok(()) => {
+                        s.sizes = applied_sizes;
                         s.last_error = None;
                         s.last_notice = Some("Applied individual system font metrics.".to_string());
                     }

@@ -1,6 +1,6 @@
 [package]
-name = "segoeui-changer"
-version = "0.1.0"
+name = "typemod"
+version = "0.1.1"
 edition = "2024"
 description = "Windows system font replacement and metrics tool in Rust + GPUI with English/Latin + Khmer support"
 
@@ -11,14 +11,21 @@ read-fonts = "0.47.0"
 rfd = "0.18.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+unicode-segmentation = "1"
 write-fonts = { version = "0.56.0", features = ["read"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [dependencies.windows]
 version = "0.62.2"
 features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
+    "Win32_Security",
+    "Win32_System_Environment",
     "Win32_System_Registry",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_UI_HiDpi",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ]

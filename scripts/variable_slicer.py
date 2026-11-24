@@ -1,11 +1,16 @@
 import io
 import json
 import os
-import shutil
 import sys
 from fontTools import subset
 from fontTools.ttLib import TTFont
 from fontTools.varLib.instancer import instantiateVariableFont
+
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
+except Exception:
+    pass
 
 
 def _load_ref_unicodes(extra_ranges=None) -> set[int]:
@@ -15,7 +20,7 @@ def _load_ref_unicodes(extra_ranges=None) -> set[int]:
     ref_unicodes = set()
     for start, end in extra_ranges:
         ref_unicodes |= set(range(int(start), int(end) + 1))
-    windir = os.environ.get("WINDIR", r"C:\Windows")
+    windir = os.environ.get("SEGOEUI_WINDIR") or os.environ.get("WINDIR") or r"C:\Windows"
     segoe_ref = os.path.join(windir, "Fonts", "segoeui.ttf")
     if os.path.exists(segoe_ref):
         ref_font = TTFont(segoe_ref, lazy=True)
@@ -69,34 +74,20 @@ def slice_variable_font(
         font = TTFont(io.BytesIO(pruned))
 
     # Pin all variable axes (e.g. opsz, GRAD, wdth) to defaultValue so output is 100% static
-    axis_locs = {"wght": weight_val}
     if "fvar" in font:
         axis_locs = {a.axisTag: a.defaultValue for a in font["fvar"].axes}
         if "wght" in axis_locs:
             axis_locs["wght"] = weight_val
-
-    # inplace=True avoids expensive deepcopy inside fontTools; font is a fresh per-weight buffer
-    instantiateVariableFont(font, axis_locs, inplace=True)
+        # inplace=True avoids expensive deepcopy inside fontTools; font is a fresh per-weight buffer
+        instantiateVariableFont(font, axis_locs, inplace=True)
+    else:
+        print(
+            f"[Slicer] Warning: '{var_path}' has no fvar table; writing static copy.",
+            file=sys.stderr,
+            flush=True,
+        )
     font.save(out_path)
     font.close()
-
-
-def create_variable_spoof(input_path: str, output_path: str) -> None:
-    """Creates SegUIVar_system_mod.ttf with its name table patched to 'Segoe UI Variable'."""
-    try:
-        font = TTFont(input_path)
-        if "name" in font:
-            for record in font["name"].names:
-                if record.nameID in (1, 4, 6, 16):
-                    val = "SegoeUIVariable" if record.nameID == 6 else "Segoe UI Variable"
-                    try:
-                        record.string = val.encode(record.getEncoding())
-                    except Exception:
-                        pass
-        font.save(output_path)
-        font.close()
-    except Exception:
-        shutil.copy(input_path, output_path)
 
 
 def resolve_weights(
@@ -142,9 +133,6 @@ def resolve_weights(
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         sys.exit(1)
-    if sys.argv[1] == "--spoof" and len(sys.argv) >= 4:
-        create_variable_spoof(sys.argv[2], sys.argv[3])
-        sys.exit(0)
     with open(sys.argv[1], "r", encoding="utf-8-sig") as f:
         req = json.load(f)
     res = resolve_weights(

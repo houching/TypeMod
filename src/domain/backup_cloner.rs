@@ -1,12 +1,17 @@
 use std::fs;
-use std::os::windows::process::CommandExt;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
+use read_fonts::FontRef;
+use zip::write::SimpleFileOptions;
+use zip::{CompressionMethod, ZipArchive, ZipWriter};
+
 use crate::domain::registry::{
-    SEGOE_FONT_SPECS, cleanup_stale_mod_files, set_font_registry_entries, windows_fonts_dir,
+    SEGOE_FONT_SPECS, SegoeFontSpec, install_mod_fonts_from_bytes, set_font_registry_entries,
+    windows_fonts_dir,
 };
 
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+const MAX_FONT_BYTES: u64 = 64 * 1024 * 1024;
 
 pub fn backup_dir() -> PathBuf {
     crate::app_state::AppState::app_docs_dir().join("Original_Segoe_Backups")
@@ -21,8 +26,14 @@ pub fn ensure_backup() -> anyhow::Result<PathBuf> {
     for spec in SEGOE_FONT_SPECS {
         let src = fonts_dir.join(spec.stock_file);
         let dst = dir.join(spec.stock_file);
-        if src.exists() && !dst.exists() {
-            fs::copy(&src, &dst)?;
+        if src.exists()
+            && !dst.exists()
+            && let Ok(meta) = fs::metadata(&src)
+            && meta.len() <= MAX_FONT_BYTES
+            && let Ok(bytes) = fs::read(&src)
+            && FontRef::new(&bytes).is_ok()
+        {
+            fs::write(&dst, &bytes)?;
         }
     }
 
@@ -31,11 +42,19 @@ pub fn ensure_backup() -> anyhow::Result<PathBuf> {
 
 pub fn backup_status() -> (usize, usize) {
     let dir = backup_dir();
-    let count = SEGOE_FONT_SPECS
-        .iter()
-        .filter(|s| dir.join(s.stock_file).exists())
-        .count();
-    (count, SEGOE_FONT_SPECS.len())
+    let fonts_dir = windows_fonts_dir();
+    let mut have = 0usize;
+    let mut total = 0usize;
+    for s in SEGOE_FONT_SPECS {
+        let in_bak = dir.join(s.stock_file).exists();
+        if in_bak || fonts_dir.join(s.stock_file).exists() {
+            total += 1;
+            if in_bak {
+                have += 1;
+            }
+        }
+    }
+    (have, total.max(1))
 }
 
 pub fn export_built_fonts(dest_dir: &Path) -> anyhow::Result<usize> {
@@ -58,154 +77,142 @@ pub fn export_built_fonts(dest_dir: &Path) -> anyhow::Result<usize> {
     Ok(exported)
 }
 
-fn unique_temp_dir(prefix: &str) -> PathBuf {
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    std::env::temp_dir().join(format!("{prefix}_{}_{}", std::process::id(), ts))
-}
-
 /// Packages all built `*_system_mod.ttf` files plus a `package.json` manifest into a shareable `.zip`.
 pub fn export_mod_package(
     dest_zip: &Path,
     latin_name: Option<&str>,
     khmer_name: Option<&str>,
 ) -> anyhow::Result<usize> {
-    let stage_dir = unique_temp_dir("segoeui_pkg_stage");
-    if stage_dir.exists() {
-        let _ = fs::remove_dir_all(&stage_dir);
+    let work_dir = crate::app_state::AppState::app_docs_dir().join("work");
+    if !work_dir.exists() {
+        anyhow::bail!("No built fonts found in {}. Build a font first.", work_dir.display());
     }
-    let count = export_built_fonts(&stage_dir)?;
 
+    let mut font_files: Vec<(String, Vec<u8>)> = Vec::new();
+    for entry in fs::read_dir(&work_dir)?.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.ends_with("_system_mod.ttf")
+            && fs::symlink_metadata(entry.path()).is_ok_and(|m| m.file_type().is_file())
+        {
+            let bytes = fs::read(entry.path())?;
+            if bytes.len() as u64 <= MAX_FONT_BYTES && FontRef::new(&bytes).is_ok() {
+                font_files.push((name, bytes));
+            }
+        }
+    }
+    if font_files.is_empty() {
+        anyhow::bail!("No built *_system_mod.ttf files found to export.");
+    }
+
+    let count = font_files.len();
     let manifest = serde_json::json!({
         "format": "segoeui-changer-package-v1",
         "latin": latin_name,
         "khmer": khmer_name,
         "font_count": count,
     });
-    fs::write(
-        stage_dir.join("package.json"),
-        serde_json::to_string_pretty(&manifest)?,
-    )?;
+    let manifest_bytes = serde_json::to_vec_pretty(&manifest)?;
+
+    if let Some(parent) = dest_zip.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let tmp_zip = dest_zip.with_extension("zip.tmp");
+    let file = fs::File::create(&tmp_zip)?;
+    let mut writer = ZipWriter::new(file);
+    let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+
+    for (name, bytes) in &font_files {
+        writer.start_file(name, opts)?;
+        writer.write_all(bytes)?;
+    }
+    writer.start_file("package.json", opts)?;
+    writer.write_all(&manifest_bytes)?;
+    writer.finish()?;
 
     if dest_zip.exists() {
         let _ = fs::remove_file(dest_zip);
     }
-    let status = std::process::Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-WindowStyle",
-            "Hidden",
-            "-Command",
-            "Compress-Archive -LiteralPath (Get-ChildItem -LiteralPath $env:SEGOEUI_PS_SRC | Select-Object -ExpandProperty FullName) -DestinationPath $env:SEGOEUI_PS_DST -Force",
-        ])
-        .env("SEGOEUI_PS_SRC", &stage_dir)
-        .env("SEGOEUI_PS_DST", dest_zip)
-        .creation_flags(CREATE_NO_WINDOW)
-        .status()?;
-
-    let _ = fs::remove_dir_all(&stage_dir);
-    if !status.success() || !dest_zip.exists() {
-        anyhow::bail!("Failed to create zip package at {}", dest_zip.display());
-    }
+    fs::rename(&tmp_zip, dest_zip)?;
     Ok(count)
 }
 
-/// Extracts a `.zip` mod package, backs up stock Segoe UI, installs the fonts, and updates HKLM.
-pub fn import_and_apply_package(src_zip: &Path) -> anyhow::Result<usize> {
-    let import_dir = unique_temp_dir("segoeui_pkg_import");
-    if import_dir.exists() {
-        let _ = fs::remove_dir_all(&import_dir);
+fn read_validated_package_fonts(
+    src_zip: &Path,
+    include_variable: bool,
+) -> anyhow::Result<Vec<(&'static SegoeFontSpec, Vec<u8>)>> {
+    let file = fs::File::open(src_zip)?;
+    let mut archive = ZipArchive::new(file)?;
+    let mut extracted: Vec<(&'static SegoeFontSpec, Vec<u8>)> = Vec::new();
+
+    for idx in 0..archive.len() {
+        let mut entry = archive.by_index(idx)?;
+        if entry.is_dir() {
+            continue;
+        }
+        // enclosed_name() rejects any path traversal (`..`, absolute/drive prefixes)
+        let Some(safe_path) = entry.enclosed_name() else {
+            continue;
+        };
+        if safe_path.components().count() != 1 {
+            continue;
+        }
+        let Some(file_name) = safe_path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let Some(spec) = SEGOE_FONT_SPECS
+            .iter()
+            .find(|s| s.mod_file.eq_ignore_ascii_case(file_name))
+        else {
+            continue;
+        };
+        if spec.is_variable && !include_variable {
+            continue;
+        }
+        if entry.size() > MAX_FONT_BYTES {
+            anyhow::bail!("Font entry '{}' exceeds 64 MB size limit", spec.mod_file);
+        }
+
+        let mut bytes = Vec::with_capacity((entry.size() as usize).min(MAX_FONT_BYTES as usize));
+        let mut limited = (&mut entry).take(MAX_FONT_BYTES + 1);
+        limited.read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > MAX_FONT_BYTES {
+            anyhow::bail!("Font entry '{}' exceeds 64 MB size limit", spec.mod_file);
+        }
+        if bytes.is_empty() || FontRef::new(&bytes).is_err() {
+            anyhow::bail!("Invalid or corrupt font file in package: {}", spec.mod_file);
+        }
+        extracted.push((spec, bytes));
     }
-    fs::create_dir_all(&import_dir)?;
 
-    let status = std::process::Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-WindowStyle",
-            "Hidden",
-            "-Command",
-            "Expand-Archive -LiteralPath $env:SEGOEUI_PS_SRC -DestinationPath $env:SEGOEUI_PS_DST -Force",
-        ])
-        .env("SEGOEUI_PS_SRC", src_zip)
-        .env("SEGOEUI_PS_DST", &import_dir)
-        .creation_flags(CREATE_NO_WINDOW)
-        .status()?;
-
-    if !status.success() {
-        let _ = fs::remove_dir_all(&import_dir);
-        anyhow::bail!("Failed to extract package {}", src_zip.display());
-    }
-
-    let marker = import_dir.join("segoeui_system_mod.ttf");
-    if !fs::symlink_metadata(&marker).is_ok_and(|m| m.file_type().is_file()) {
-        let _ = fs::remove_dir_all(&import_dir);
+    if !extracted
+        .iter()
+        .any(|(spec, _)| spec.mod_file == "segoeui_system_mod.ttf")
+    {
         anyhow::bail!("Invalid package: segoeui_system_mod.ttf not found in archive.");
     }
 
-    let _ = ensure_backup()?;
-
-    let fonts_dir = windows_fonts_dir();
-    let ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(1);
-    let tag = format!("{ms}_{}", std::process::id());
-    let mut reg_updates: Vec<(&str, String)> = Vec::new();
-    let mut copied_paths: Vec<PathBuf> = Vec::new();
-    for spec in SEGOE_FONT_SPECS {
-        let src = import_dir.join(spec.mod_file);
-        if fs::symlink_metadata(&src).is_ok_and(|m| m.file_type().is_file()) {
-            let bytes = fs::read(&src)?;
-            if write_fonts::read::FontRef::new(&bytes).is_err() {
-                let _ = fs::remove_dir_all(&import_dir);
-                anyhow::bail!("Invalid font file in package: {}", spec.mod_file);
-            }
-            let tagged = spec.mod_file.replace(".ttf", &format!("_{tag}.ttf"));
-            let dst = fonts_dir.join(&tagged);
-            if let Err(e) = fs::copy(&src, &dst) {
-                for p in &copied_paths {
-                    let _ = fs::remove_file(p);
-                }
-                let _ = fs::remove_dir_all(&import_dir);
-                return Err(e.into());
-            }
-            copied_paths.push(dst);
-            reg_updates.push((spec.reg_key, tagged));
-        }
-    }
-
-    let reg_refs: Vec<(&str, &str)> = reg_updates
-        .iter()
-        .map(|(k, v)| (*k, v.as_str()))
-        .collect();
-    if let Err(e) = set_font_registry_entries(&reg_refs) {
-        for p in &copied_paths {
-            let _ = fs::remove_file(p);
-        }
-        let _ = fs::remove_dir_all(&import_dir);
-        return Err(e);
-    }
-    let _ = crate::domain::resizer::set_system_font_face("Segoe UI");
-    let _ = cleanup_stale_mod_files();
-    let _ = fs::remove_dir_all(&import_dir);
-
-    Ok(reg_updates.len())
+    Ok(extracted)
 }
 
-/// Patches a font's OpenType `name` table in pure Rust using `write-fonts` and writes the result to `dst`.
-pub fn patch_font_name_table(
-    src: &Path,
-    dst: &Path,
+/// Extracts a `.zip` mod package in-memory, validates all fonts, backs up stock Segoe UI,
+/// installs the fonts, and updates HKLM.
+pub fn import_and_apply_package(src_zip: &Path) -> anyhow::Result<usize> {
+    let include_variable = windows_fonts_dir().join("SegUIVar.ttf").exists();
+    let items = read_validated_package_fonts(src_zip, include_variable)?;
+    let _ = ensure_backup()?;
+    install_mod_fonts_from_bytes(&items)
+}
+
+/// Patches a font's OpenType `name` table in memory using `write-fonts`.
+pub fn patch_font_name_table_bytes(
+    bytes: &[u8],
     transform: impl Fn(u16, &str) -> Option<String>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Vec<u8>> {
     use write_fonts::from_obj::ToOwnedTable;
     use write_fonts::read::{FontRef, TableProvider};
     use write_fonts::{FontBuilder, OffsetMarker};
 
-    let bytes = fs::read(src)?;
-    let font = FontRef::new(&bytes)?;
+    let font = FontRef::new(bytes)?;
     let mut name_table: write_fonts::tables::name::Name = font.name()?.to_owned_table();
 
     for record in &mut name_table.name_record {
@@ -218,7 +225,17 @@ pub fn patch_font_name_table(
     let mut builder = FontBuilder::new();
     builder.add_table(&name_table)?;
     builder.copy_missing_tables(font);
-    let out_bytes = builder.build();
+    Ok(builder.build())
+}
+
+/// Patches a font's OpenType `name` table in pure Rust using `write-fonts` and writes the result to `dst`.
+pub fn patch_font_name_table(
+    src: &Path,
+    dst: &Path,
+    transform: impl Fn(u16, &str) -> Option<String>,
+) -> anyhow::Result<()> {
+    let bytes = fs::read(src)?;
+    let out_bytes = patch_font_name_table_bytes(&bytes, transform)?;
     fs::write(dst, out_bytes)?;
     Ok(())
 }
@@ -293,5 +310,48 @@ mod tests {
         assert!(has_clone, "patched name table should contain 'Segoe UI Clone'");
 
         let _ = std::fs::remove_file(&dst);
+    }
+
+    #[test]
+    fn package_reader_rejects_zip_slip_and_corrupt_fonts() {
+        use std::io::Write;
+        use zip::ZipWriter;
+        use zip::write::SimpleFileOptions;
+
+        let valid_font = std::path::Path::new(r"C:\Windows\Fonts\segoeui.ttf");
+        assert!(valid_font.exists());
+        let valid_bytes = std::fs::read(valid_font).unwrap();
+
+        let dir = std::env::temp_dir().join(format!("segoeui_zip_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // 1. Archive with Zip Slip entry and valid segoeui_system_mod.ttf: Zip Slip must be ignored
+        let slip_zip = dir.join("slip.zip");
+        {
+            let mut w = ZipWriter::new(std::fs::File::create(&slip_zip).unwrap());
+            let opts = SimpleFileOptions::default();
+            w.start_file("../../segoeuib_system_mod.ttf", opts).unwrap();
+            w.write_all(&valid_bytes).unwrap();
+            w.start_file("segoeui_system_mod.ttf", opts).unwrap();
+            w.write_all(&valid_bytes).unwrap();
+            w.finish().unwrap();
+        }
+        let items = super::read_validated_package_fonts(&slip_zip, false).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].0.mod_file, "segoeui_system_mod.ttf");
+
+        // 2. Archive with corrupt segoeui_system_mod.ttf must fail validation
+        let corrupt_zip = dir.join("corrupt.zip");
+        {
+            let mut w = ZipWriter::new(std::fs::File::create(&corrupt_zip).unwrap());
+            w.start_file("segoeui_system_mod.ttf", SimpleFileOptions::default())
+                .unwrap();
+            w.write_all(b"not a real ttf").unwrap();
+            w.finish().unwrap();
+        }
+        assert!(super::read_validated_package_fonts(&corrupt_zip, false).is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -29,7 +29,8 @@ impl Render for LogDrawer {
             return div().into_any_element();
         }
         let theme = s.theme();
-        let lines: Vec<String> = s.build_log.iter().rev().take(200).rev().cloned().collect();
+        let lines: Vec<gpui::SharedString> =
+            s.build_log.iter().rev().take(200).rev().cloned().collect();
 
         div()
             .h(px(190.0))
@@ -69,7 +70,14 @@ impl Render for LogDrawer {
                                 .variant(ButtonVariant::Ghost)
                                 .disabled(s.build_log.is_empty())
                                 .on_click(cx.listener(|this, _, _, cx| {
-                                    let text = this.state.read(cx).build_log.join("\n");
+                                    let text: String = this
+                                        .state
+                                        .read(cx)
+                                        .build_log
+                                        .iter()
+                                        .map(|l| l.as_ref())
+                                        .collect::<Vec<&str>>()
+                                        .join("\n");
                                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
                                     this.copied = true;
                                     cx.notify();

@@ -3,6 +3,7 @@ use gpui::{
     App, ClickEvent, ElementId, FocusHandle, InteractiveElement, KeyDownEvent, MouseButton,
     ParentElement, SharedString, StatefulInteractiveElement, Styled, Window, div, px, svg,
 };
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::ui::theme::VantageTheme;
 
@@ -46,6 +47,86 @@ impl TextFieldState {
         }
     }
 
+    pub fn move_left(&mut self) -> bool {
+        self.clamp_cursor();
+        if self.cursor == 0 {
+            return false;
+        }
+        let prev = self.text[..self.cursor]
+            .grapheme_indices(true)
+            .next_back()
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        self.cursor = prev;
+        self.cursor_visible = true;
+        true
+    }
+
+    pub fn move_right(&mut self) -> bool {
+        self.clamp_cursor();
+        if self.cursor >= self.text.len() {
+            return false;
+        }
+        let next = self.text[self.cursor..]
+            .grapheme_indices(true)
+            .nth(1)
+            .map(|(i, _)| self.cursor + i)
+            .unwrap_or(self.text.len());
+        self.cursor = next;
+        self.cursor_visible = true;
+        true
+    }
+
+    pub fn delete_forward(&mut self) -> bool {
+        self.clamp_cursor();
+        if self.cursor >= self.text.len() {
+            return false;
+        }
+        let next = self.text[self.cursor..]
+            .grapheme_indices(true)
+            .nth(1)
+            .map(|(i, _)| self.cursor + i)
+            .unwrap_or(self.text.len());
+        self.text.drain(self.cursor..next);
+        self.cursor_visible = true;
+        true
+    }
+
+    pub fn backspace(&mut self, by_word: bool) -> bool {
+        self.clamp_cursor();
+        if self.cursor == 0 {
+            return false;
+        }
+        if by_word {
+            let is_sep = |c: char| c.is_whitespace() || c == '\u{200B}';
+            let mut start = self.cursor;
+            for (idx, ch) in self.text[..self.cursor].char_indices().rev() {
+                if !is_sep(ch) {
+                    break;
+                }
+                start = idx;
+            }
+            for (idx, ch) in self.text[..start].char_indices().rev() {
+                if is_sep(ch) {
+                    break;
+                }
+                start = idx;
+            }
+            self.text.drain(start..self.cursor);
+            self.cursor = start;
+        } else {
+            let prev = self.text[..self.cursor]
+                .char_indices()
+                .next_back()
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            self.text.drain(prev..self.cursor);
+            self.cursor = prev;
+        }
+        self.cursor_visible = true;
+        true
+    }
+
     /// Handles common text editing keys. Returns `true` if text or cursor changed.
     pub fn handle_key_down(&mut self, event: &KeyDownEvent, cx: &App) -> bool {
         self.clamp_cursor();
@@ -64,32 +145,8 @@ impl TextFieldState {
         }
 
         match key {
-            "left" => {
-                if self.cursor > 0 {
-                    let prev = self.text[..self.cursor]
-                        .char_indices()
-                        .next_back()
-                        .map(|(i, _)| i)
-                        .unwrap_or(0);
-                    self.cursor = prev;
-                    self.cursor_visible = true;
-                    return true;
-                }
-                false
-            }
-            "right" => {
-                if self.cursor < self.text.len() {
-                    let next = self.text[self.cursor..]
-                        .char_indices()
-                        .nth(1)
-                        .map(|(i, _)| self.cursor + i)
-                        .unwrap_or(self.text.len());
-                    self.cursor = next;
-                    self.cursor_visible = true;
-                    return true;
-                }
-                false
-            }
+            "left" => self.move_left(),
+            "right" => self.move_right(),
             "home" => {
                 self.cursor = 0;
                 self.cursor_visible = true;
@@ -100,49 +157,8 @@ impl TextFieldState {
                 self.cursor_visible = true;
                 true
             }
-            "backspace" => {
-                if self.cursor == 0 {
-                    return false;
-                }
-                if mods.control {
-                    let mut start = self.cursor;
-                    let bytes = self.text.as_bytes();
-                    while start > 0 && bytes[start - 1].is_ascii_whitespace() {
-                        start -= 1;
-                    }
-                    while start > 0 && !bytes[start - 1].is_ascii_whitespace() {
-                        start -= 1;
-                    }
-                    while start > 0 && !self.text.is_char_boundary(start) {
-                        start -= 1;
-                    }
-                    self.text.drain(start..self.cursor);
-                    self.cursor = start;
-                } else {
-                    let prev = self.text[..self.cursor]
-                        .char_indices()
-                        .next_back()
-                        .map(|(i, _)| i)
-                        .unwrap_or(0);
-                    self.text.drain(prev..self.cursor);
-                    self.cursor = prev;
-                }
-                self.cursor_visible = true;
-                true
-            }
-            "delete" => {
-                if self.cursor >= self.text.len() {
-                    return false;
-                }
-                let next = self.text[self.cursor..]
-                    .char_indices()
-                    .nth(1)
-                    .map(|(i, _)| self.cursor + i)
-                    .unwrap_or(self.text.len());
-                self.text.drain(self.cursor..next);
-                self.cursor_visible = true;
-                true
-            }
+            "backspace" => self.backspace(mods.control),
+            "delete" => self.delete_forward(),
             _ => {
                 if let Some(ch) = &event.keystroke.key_char
                     && !mods.control
@@ -196,7 +212,17 @@ impl TextFieldState {
             (self.text.as_str(), "")
         };
 
-        let caret = || div().w(px(1.5)).h(px(15.0)).bg(theme.accent).flex_shrink_0();
+        let caret = |visible: bool| {
+            div()
+                .w(px(1.5))
+                .h(px(15.0))
+                .bg(if visible {
+                    theme.accent
+                } else {
+                    gpui::transparent_black()
+                })
+                .flex_shrink_0()
+        };
 
         div()
             .id(id)
@@ -241,22 +267,11 @@ impl TextFieldState {
                             .flex()
                             .items_center()
                             .min_w_0()
-                            .when(show_cursor, |d| d.child(caret().mr(px(2.0))))
+                            .when(is_focused, |d| d.child(caret(show_cursor).mr(px(2.0))))
                             .child(SharedString::from(placeholder.to_string()))
                     } else {
                         let visible_before = if is_focused {
-                            let count = before.chars().count();
-                            if count > 48 {
-                                let skip = count - 48;
-                                let byte_idx = before
-                                    .char_indices()
-                                    .nth(skip)
-                                    .map(|(i, _)| i)
-                                    .unwrap_or(0);
-                                format!("…{}", &before[byte_idx..])
-                            } else {
-                                before.to_string()
-                            }
+                            truncate_before_graphemes(before, 48)
                         } else {
                             before.to_string()
                         };
@@ -267,7 +282,7 @@ impl TextFieldState {
                             .when(!visible_before.is_empty(), |d| {
                                 d.child(SharedString::from(visible_before))
                             })
-                            .when(show_cursor, |d| d.child(caret().flex_shrink_0()))
+                            .when(is_focused, |d| d.child(caret(show_cursor)))
                             .when(!after.is_empty(), |d| {
                                 d.child(SharedString::from(after.to_string()))
                             })
@@ -298,5 +313,37 @@ impl TextFieldState {
                         )
                     }),
             )
+    }
+}
+
+fn truncate_before_graphemes(before: &str, max_graphemes: usize) -> String {
+    let count = before.grapheme_indices(true).count();
+    if count > max_graphemes {
+        let skip = count - max_graphemes;
+        let byte_idx = before
+            .grapheme_indices(true)
+            .nth(skip)
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        format!("…{}", &before[byte_idx..])
+    } else {
+        before.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate_before_graphemes;
+
+    #[test]
+    fn grapheme_truncation_keeps_khmer_clusters_intact() {
+        // "ខ្ញុំ" is 5 Unicode scalars forming 1 Khmer grapheme cluster
+        let cluster = "ខ្ញុំ";
+        let text = format!("{cluster}abc");
+        let truncated = truncate_before_graphemes(&text, 3);
+        assert_eq!(truncated, "…abc");
+
+        let exact = truncate_before_graphemes(cluster, 1);
+        assert_eq!(exact, cluster);
     }
 }

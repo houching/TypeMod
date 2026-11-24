@@ -210,6 +210,7 @@ impl RenderOnce for VantageButton {
                 d.child(
                     div()
                         .size(px(15.0))
+                        .when(!self.icon_only, |d| d.mb(px(1.5)))
                         .flex()
                         .items_center()
                         .justify_center()
@@ -243,42 +244,6 @@ impl RenderOnce for VantageButton {
 
         el
     }
-}
-
-pub fn vantage_card(theme: VantageTheme) -> gpui::Div {
-    div()
-        .bg(theme.surface)
-        .border_1()
-        .border_color(theme.line)
-        .rounded(px(8.0))
-        .p(px(16.0))
-        .flex()
-        .flex_col()
-        .gap(px(12.0))
-}
-
-pub fn view_header(
-    title: impl Into<SharedString>,
-    subtitle: impl Into<SharedString>,
-    theme: VantageTheme,
-) -> gpui::Div {
-    div()
-        .flex()
-        .flex_col()
-        .gap(px(2.0))
-        .child(
-            div()
-                .text_lg()
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(theme.text)
-                .child(title.into()),
-        )
-        .child(
-            div()
-                .text_xs()
-                .text_color(theme.text_2)
-                .child(subtitle.into()),
-        )
 }
 
 #[derive(IntoElement)]

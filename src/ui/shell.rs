@@ -28,6 +28,7 @@ pub struct ShellView {
     log_drawer: Entity<LogDrawer>,
     ui_font_family: SharedString,
     logo_img: Arc<Image>,
+    last_rem_size: Option<f32>,
     _sub: Subscription,
 }
 
@@ -54,7 +55,7 @@ impl ShellView {
         let home = cx.new(|_| HomeView::new(state.clone(), picker.clone(), confirm_modal.clone()));
         let preview = cx.new(|cx| PreviewView::new(state.clone(), cx));
         let resizer = cx.new(|_| ResizerView::new(state.clone()));
-        let settings = cx.new(|_| SettingsView::new(state.clone(), confirm_modal.clone()));
+        let settings = cx.new(|cx| SettingsView::new(state.clone(), confirm_modal.clone(), cx));
         let log_drawer = cx.new(|_| LogDrawer::new(state.clone()));
         let ui_font_family = pick_safe_ui_font(cx);
         let logo_img = Arc::new(Image::from_bytes(
@@ -76,6 +77,7 @@ impl ShellView {
             log_drawer,
             ui_font_family,
             logo_img,
+            last_rem_size: None,
             _sub,
         }
     }
@@ -110,7 +112,11 @@ impl ShellView {
 impl Render for ShellView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let s = self.state.read(cx);
-        window.set_rem_size(px(s.ui_rem_size()));
+        let rem = s.ui_rem_size();
+        if self.last_rem_size != Some(rem) {
+            window.set_rem_size(px(rem));
+            self.last_rem_size = Some(rem);
+        }
         let collapsed = !s.config.rail_pinned || window.viewport_size().width < px(760.0);
         let theme = s.theme();
         let active_tab = s.active_tab;
@@ -187,7 +193,7 @@ impl Render for ShellView {
                                                                 .text_sm()
                                                                 .font_weight(gpui::FontWeight::BOLD)
                                                                 .text_color(theme.text)
-                                                                .child("SegoeUI Changer"),
+                                                                .child("TypeMod"),
                                                         )
                                                         .child(
                                                             div()
@@ -497,10 +503,15 @@ impl Render for ShellView {
                                                                     message: "Save any open work before restarting. Reboot Windows now?".to_string(),
                                                                     confirm_label: "Reboot Now".to_string(),
                                                                     dangerous: true,
+                                                                    on_cancel: None,
                                                                     on_confirm: Box::new(|_, _| {
-                                                                        let _ = std::process::Command::new("shutdown")
-                                                                            .args(["/r", "/t", "3"])
-                                                                            .spawn();
+                                                                        use std::os::windows::process::CommandExt;
+                                                                        let _ = std::process::Command::new(
+                                                                            crate::domain::registry::shutdown_exe(),
+                                                                        )
+                                                                        .args(["/r", "/t", "3"])
+                                                                        .creation_flags(0x0800_0000)
+                                                                        .spawn();
                                                                     }),
                                                                 },
                                                                 window,

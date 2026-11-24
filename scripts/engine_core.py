@@ -7,8 +7,8 @@ import fontforge
 import psMat
 
 try:
-    sys.stdout.reconfigure(line_buffering=True)
-    sys.stderr.reconfigure(line_buffering=True)
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 except Exception:
     pass
 
@@ -175,12 +175,8 @@ def _cleanup_unused_glyphs(font, preserve_arabic_joining=False, remove_kern_look
             problematic.update({"uni200C", "uni200D", "uni200E", "uni200F"})
 
         to_remove = []
-        for i in range(len(font)):
-            g = None
+        for g in font.glyphs():
             try:
-                g = font[i]
-                if g is None:
-                    continue
                 if g.glyphname in problematic:
                     to_remove.append(g.glyphname)
                     continue
@@ -190,8 +186,6 @@ def _cleanup_unused_glyphs(font, preserve_arabic_joining=False, remove_kern_look
                         to_remove.append(g.glyphname)
             except Exception:
                 pass
-            finally:
-                g = None
 
         for gname in to_remove:
             try:
@@ -200,6 +194,29 @@ def _cleanup_unused_glyphs(font, preserve_arabic_joining=False, remove_kern_look
                 pass
     except Exception as e:
         print(f"     -> Warning during glyph cleanup: {e}")
+
+
+def _subtract_ranges(base_ranges, keep_ranges):
+    spans = list(base_ranges)
+    for ks, ke in keep_ranges:
+        next_spans = []
+        for bs, be in spans:
+            if ke < bs or ks > be:
+                next_spans.append((bs, be))
+            else:
+                if bs < ks:
+                    next_spans.append((bs, ks - 1))
+                if be > ke:
+                    next_spans.append((ke + 1, be))
+        spans = next_spans
+    return spans
+
+
+def _font_has_range(font, start, end):
+    for cp in range(int(start), int(end) + 1):
+        if cp in font:
+            return True
+    return False
 
 
 def _prepare_source_font(
@@ -253,13 +270,17 @@ def _prepare_source_font(
 
         if wipe_latin:
             try:
-                font.selection.select(("ranges",), 0x0020, 0x024F)
-                font.selection.select(("more", "ranges"), 0x1E00, 0x1EFF)
-                font.clear()
+                spans = _subtract_ranges([(0x0020, 0x024F), (0x1E00, 0x1EFF)], EXTRA_RANGES)
+                if spans:
+                    font.selection.select(("ranges",), spans[0][0], spans[0][1])
+                    for s, e in spans[1:]:
+                        font.selection.select(("more", "ranges"), s, e)
+                    font.clear()
             except Exception as e:
-                print(f"     -> Error clearing Latin range: {e}")
+                print(f"     -> Error clearing Latin range: {e}", file=sys.stderr)
 
-        if sync_symbols_only:
+        arabic_requested = any(s <= 0x06FF and e >= 0x0600 for s, e in EXTRA_RANGES)
+        if sync_symbols_only and not arabic_requested:
             try:
                 font.selection.select(("ranges",), 0x0600, 0x06FF)
                 font.selection.select(("more", "ranges"), 0x0750, 0x077F)
@@ -268,11 +289,11 @@ def _prepare_source_font(
                 font.selection.select(("more", "ranges"), 0xFE70, 0xFEFF)
                 font.clear()
             except Exception as e:
-                print(f"     -> Error clearing Arabic leftovers: {e}")
+                print(f"     -> Error clearing Arabic leftovers: {e}", file=sys.stderr)
 
         return font
     except Exception as e:
-        print(f"     -> Critical error processing {os.path.basename(path)}: {e}")
+        print(f"     -> Critical error processing {os.path.basename(path)}: {e}", file=sys.stderr)
         if font:
             try:
                 font.close()
@@ -281,17 +302,13 @@ def _prepare_source_font(
         return None
 
 
-def _prepare_segoe_fallback(segoe_font, is_latin_only):
+def _prepare_segoe_fallback(segoe_font, is_latin_only, active_fonts):
     """Clears replaced ranges from the already-open Segoe UI font in memory."""
     segoe_font.selection.select(("ranges",), 0x0020, 0x024F)
     segoe_font.selection.select(("more", "ranges"), 0x1E00, 0x1EFF)
-    segoe_font.selection.select(("more", "ranges"), 0x0600, 0x06FF)
-    segoe_font.selection.select(("more", "ranges"), 0xFB50, 0xFDFF)
-    segoe_font.selection.select(("more", "ranges"), 0xFE70, 0xFEFF)
-    segoe_font.selection.select(("more", "ranges"), 0x1780, 0x17FF)
-    segoe_font.selection.select(("more", "ranges"), 0x19E0, 0x19FF)
     for s, e in EXTRA_RANGES:
-        segoe_font.selection.select(("more", "ranges"), s, e)
+        if any(_font_has_range(f, s, e) for f in active_fonts):
+            segoe_font.selection.select(("more", "ranges"), s, e)
     segoe_font.clear()
 
     if not is_latin_only:
@@ -311,14 +328,16 @@ def _prepare_segoe_fallback(segoe_font, is_latin_only):
 
 def process_weight(latin_path, arabic_path, weight_type, segoe_filename, mode="visual", out_dir=None):
     if latin_path == "NONE":
-        return
+        print(f"  -> Error: Missing Latin input for {weight_type}.", file=sys.stderr)
+        return False
 
     base_dir = out_dir or os.getcwd()
     print(f"\n[Engine] Processing {weight_type} weight...")
-    segoe_path = os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts", segoe_filename)
+    windir = os.environ.get("SEGOEUI_WINDIR") or os.environ.get("WINDIR") or r"C:\Windows"
+    segoe_path = os.path.join(windir, "Fonts", segoe_filename)
     if not os.path.exists(segoe_path):
-        print(f"  -> Error: System {segoe_filename} not found. Skipping...")
-        return
+        print(f"  -> Error: System {segoe_filename} not found at {segoe_path}.", file=sys.stderr)
+        return False
 
     segoe_font = None
     lat_font = None
@@ -341,8 +360,8 @@ def process_weight(latin_path, arabic_path, weight_type, segoe_filename, mode="v
             remove_kern_lookups=False,
         )
         if not lat_font:
-            print(f"  -> Error: Failed to prepare Latin font. Skipping {weight_type}...")
-            return
+            print(f"  -> Error: Failed to prepare Latin font. Skipping {weight_type}...", file=sys.stderr)
+            return False
 
         if arabic_path != "NONE":
             ara_font = _prepare_source_font(
@@ -354,8 +373,8 @@ def process_weight(latin_path, arabic_path, weight_type, segoe_filename, mode="v
                 remove_kern_lookups=False,
             )
             if not ara_font:
-                print(f"  -> Error: Failed to prepare Arabic font. Skipping {weight_type}...")
-                return
+                print(f"  -> Error: Failed to prepare Secondary font. Skipping {weight_type}...", file=sys.stderr)
+                return False
 
         for extra_path in EXTRA_FONT_MAP.get(weight_type, []):
             if not extra_path or extra_path == "NONE":
@@ -368,10 +387,13 @@ def process_weight(latin_path, arabic_path, weight_type, segoe_filename, mode="v
                 preserve_arabic_joining=True,
                 remove_kern_lookups=False,
             )
-            if ef is not None:
-                extra_fonts.append(ef)
+            if ef is None:
+                print(f"  -> Error: Failed to prepare extra font '{extra_path}' for {weight_type}.", file=sys.stderr)
+                return False
+            extra_fonts.append(ef)
 
-        _prepare_segoe_fallback(segoe_font, is_latin_only)
+        active_fonts = [f for f in [lat_font, ara_font, *extra_fonts] if f is not None]
+        _prepare_segoe_fallback(segoe_font, is_latin_only, active_fonts)
 
         print("  -> Assembling final font...")
         if ara_font is not None:
@@ -413,8 +435,15 @@ def run_batch(args, style="normal", default_mode="visual"):
     weights = ITALIC_WEIGHTS if style == "italic" else NORMAL_WEIGHTS
     label = "Italic" if style == "italic" else "Standard"
     print(f"\n[Engine] Starting In-Memory {label} Builder ({mode} mode)...")
+    all_ok = True
     for idx, (weight_name, sys_filename) in enumerate(weights):
-        process_weight(args[idx], args[6 + idx], weight_name, sys_filename, mode=mode)
+        if args[idx] == "NONE":
+            continue
+        if not process_weight(args[idx], args[6 + idx], weight_name, sys_filename, mode=mode):
+            all_ok = False
+    if not all_ok:
+        print("\n[Engine] Build finished with errors.", file=sys.stderr)
+        sys.exit(1)
     print("\n[Engine] All system replacement fonts built successfully!")
 
 

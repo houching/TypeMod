@@ -15,6 +15,7 @@ pub struct ConfirmRequest {
     pub confirm_label: String,
     pub dangerous: bool,
     pub on_confirm: ConfirmHandler,
+    pub on_cancel: Option<ConfirmHandler>,
 }
 
 pub struct ConfirmModal {
@@ -38,9 +39,13 @@ impl ConfirmModal {
         cx.notify();
     }
 
-    pub fn close(&mut self, cx: &mut Context<Self>) {
-        self.pending = None;
-        cx.notify();
+    pub fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(req) = self.pending.take() {
+            cx.notify();
+            if let Some(on_cancel) = req.on_cancel {
+                on_cancel(window, cx);
+            }
+        }
     }
 
     fn confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -55,7 +60,7 @@ impl ConfirmModal {
             return;
         }
         match event.keystroke.key.as_str() {
-            "escape" => self.close(cx),
+            "escape" => self.cancel(window, cx),
             "enter" => self.confirm(window, cx),
             _ => {}
         }
@@ -87,8 +92,8 @@ impl Render for ConfirmModal {
             .on_key_down(cx.listener(Self::on_key_down))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    this.close(cx);
+                cx.listener(|this, _, window, cx| {
+                    this.cancel(window, cx);
                     cx.stop_propagation();
                 }),
             )
@@ -131,7 +136,9 @@ impl Render for ConfirmModal {
                             .child(
                                 VantageButton::new("confirm-cancel", "Cancel", theme)
                                     .variant(ButtonVariant::Ghost)
-                                    .on_click(cx.listener(|this, _, _, cx| this.close(cx))),
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.cancel(window, cx)
+                                    })),
                             )
                             .child(
                                 VantageButton::new("confirm-ok", confirm_label, theme)
@@ -166,6 +173,7 @@ pub fn prompt_elevated_relaunch(
                 message: description.into(),
                 confirm_label: "Relaunch Elevated".to_string(),
                 dangerous: false,
+                on_cancel: None,
                 on_confirm: Box::new(move |_, cx| {
                     match state_clone.read(cx).save_temp_state() {
                         Ok(state_path) => match relaunch_elevated(&state_path) {

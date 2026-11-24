@@ -16,6 +16,7 @@ use crate::ui::text_input::{TextBoxProps, TextFieldState};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PreviewSource {
+    BuiltOutput,
     SelectedFonts,
     SystemSegoe,
 }
@@ -27,7 +28,12 @@ pub struct PreviewView {
     input: TextFieldState,
     loaded_paths: HashSet<PathBuf>,
     last_candidates: Vec<PathBuf>,
+    has_selected: bool,
+    load_gen: u64,
     selected_family: Option<SharedString>,
+    built_loaded_rev: Option<u64>,
+    built_gen: u64,
+    built_family: Option<SharedString>,
     load_error: Option<String>,
     scroll_handle: gpui::ScrollHandle,
 }
@@ -44,7 +50,12 @@ impl PreviewView {
             ),
             loaded_paths: HashSet::new(),
             last_candidates: Vec::new(),
+            has_selected: false,
+            load_gen: 0,
             selected_family: None,
+            built_loaded_rev: None,
+            built_gen: 0,
+            built_family: None,
             load_error: None,
             scroll_handle: gpui::ScrollHandle::new(),
         }
@@ -81,6 +92,7 @@ impl PreviewView {
 
     fn ensure_selected_fonts_loaded(&mut self, cx: &mut Context<Self>) {
         let cfg = &self.state.read(cx).config;
+        let reg_path = cfg.latin.regular.clone();
         let mut raw_candidates: Vec<PathBuf> = [
             &cfg.latin.regular,
             &cfg.latin.light,
@@ -104,7 +116,10 @@ impl PreviewView {
             return;
         }
         self.last_candidates = raw_candidates.clone();
+        self.has_selected = reg_path.is_some();
         self.selected_family = None;
+        self.load_gen += 1;
+        let req_gen = self.load_gen;
 
         let to_load: Vec<PathBuf> = raw_candidates
             .into_iter()
@@ -113,39 +128,176 @@ impl PreviewView {
         let all_candidates = self.last_candidates.clone();
 
         cx.spawn(async move |this, cx| {
-            let (blobs, loaded, first_family) = cx
+            let (valid_fonts, first_family, reg_exists, read_err) = cx
                 .background_executor()
                 .spawn(async move {
-                    let mut new_blobs: Vec<Cow<'static, [u8]>> = Vec::new();
-                    let mut loaded = Vec::new();
+                    let mut read_cache: std::collections::HashMap<PathBuf, Vec<u8>> =
+                        std::collections::HashMap::new();
+                    let mut valid_fonts: Vec<(PathBuf, Vec<u8>)> = Vec::new();
+                    let mut first_err: Option<String> = None;
                     for path in &to_load {
-                        if let Ok(bytes) = fs::read(path) {
-                            new_blobs.push(Cow::Owned(bytes));
-                            loaded.push(path.clone());
+                        match fs::read(path) {
+                            Ok(bytes) => {
+                                if FontRef::new(&bytes).is_ok() {
+                                    read_cache.insert(path.clone(), bytes.clone());
+                                    valid_fonts.push((path.clone(), bytes));
+                                } else if first_err.is_none() {
+                                    first_err = Some(format!(
+                                        "Invalid font file for preview: {}",
+                                        path.display()
+                                    ));
+                                }
+                            }
+                            Err(e) => {
+                                if first_err.is_none() {
+                                    first_err = Some(format!(
+                                        "Cannot read font {}: {e}",
+                                        path.display()
+                                    ));
+                                }
+                            }
                         }
                     }
-                    let first_family = all_candidates
-                        .iter()
-                        .find_map(|p| fs::read(p).ok().and_then(|b| extract_family_name(&b)));
-                    (new_blobs, loaded, first_family)
+                    let first_family = all_candidates.iter().find_map(|p| {
+                        if let Some(bytes) = read_cache.get(p) {
+                            extract_family_name(bytes)
+                        } else {
+                            fs::read(p).ok().and_then(|b| extract_family_name(&b))
+                        }
+                    });
+                    let reg_exists = reg_path.is_some_and(|p| p.exists());
+                    (valid_fonts, first_family, reg_exists, first_err)
                 })
                 .await;
 
             let _ = this.update(cx, |view, cx| {
-                for p in loaded {
-                    view.loaded_paths.insert(p);
+                if view.load_gen != req_gen {
+                    return;
                 }
+                view.has_selected = reg_exists;
                 if view.selected_family.is_none() {
                     view.selected_family = first_family.map(Into::into);
                 }
-                if !blobs.is_empty() {
-                    match cx.text_system().add_fonts(blobs) {
-                        Ok(()) => view.load_error = None,
+                let mut err_msg = read_err;
+                for (path, bytes) in valid_fonts {
+                    match cx.text_system().add_fonts(vec![Cow::Owned(bytes)]) {
+                        Ok(()) => {
+                            view.loaded_paths.insert(path);
+                        }
                         Err(e) => {
-                            view.load_error = Some(format!("Failed to load font into preview: {e}"))
+                            if err_msg.is_none() {
+                                err_msg = Some(format!(
+                                    "Failed to load {} into preview: {e}",
+                                    path.display()
+                                ));
+                            }
                         }
                     }
                 }
+                view.load_error = err_msg;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn ensure_built_fonts_loaded(&mut self, cx: &mut Context<Self>) {
+        let (has_built, rev) = {
+            let s = self.state.read(cx);
+            (s.has_built_fonts, s.built_revision)
+        };
+        if !has_built {
+            self.built_family = None;
+            self.built_loaded_rev = None;
+            return;
+        }
+        if self.built_loaded_rev == Some(rev) {
+            return;
+        }
+        self.built_loaded_rev = Some(rev);
+        self.built_gen += 1;
+        let req_gen = self.built_gen;
+        let preview_family = format!("SegoeUI Built Preview {}", rev + 1);
+
+        cx.spawn(async move |this, cx| {
+            let fam_clone = preview_family.clone();
+            let (patched_blobs, first_err) = cx
+                .background_executor()
+                .spawn(async move {
+                    let work_dir = crate::domain::builder::built_fonts_dir();
+                    let mut blobs: Vec<Vec<u8>> = Vec::new();
+                    let mut first_err: Option<String> = None;
+                    for spec in crate::domain::registry::SEGOE_FONT_SPECS
+                        .iter()
+                        .filter(|s| !s.is_italic && !s.is_variable)
+                    {
+                        let p = work_dir.join(spec.mod_file);
+                        if !p.is_file() {
+                            continue;
+                        }
+                        match fs::read(&p) {
+                            Ok(bytes) => {
+                                let fam_ref = fam_clone.as_str();
+                                let fam_no_space = fam_ref.replace(' ', "");
+                                match crate::domain::backup_cloner::patch_font_name_table_bytes(
+                                    &bytes,
+                                    |name_id, text| {
+                                        if name_id == 6 {
+                                            if text.contains("SegoeUI") {
+                                                Some(text.replace("SegoeUI", &fam_no_space))
+                                            } else if text.contains("Segoe UI") {
+                                                Some(text.replace("Segoe UI", &fam_no_space))
+                                            } else {
+                                                None
+                                            }
+                                        } else if text.contains("Segoe UI") {
+                                            Some(text.replace("Segoe UI", fam_ref))
+                                        } else if text.contains("SegoeUI") {
+                                            Some(text.replace("SegoeUI", &fam_no_space))
+                                        } else {
+                                            None
+                                        }
+                                    },
+                                ) {
+                                    Ok(patched) => blobs.push(patched),
+                                    Err(e) if first_err.is_none() => {
+                                        first_err = Some(format!(
+                                            "Failed to prepare built preview for {}: {e}",
+                                            spec.mod_file
+                                        ));
+                                    }
+                                    Err(_) => {}
+                                }
+                            }
+                            Err(e) if first_err.is_none() => {
+                                first_err = Some(format!("Cannot read {}: {e}", p.display()));
+                            }
+                            Err(_) => {}
+                        }
+                    }
+                    (blobs, first_err)
+                })
+                .await;
+
+            let _ = this.update(cx, |view, cx| {
+                if view.built_gen != req_gen {
+                    return;
+                }
+                let mut err_msg = first_err;
+                let mut any_ok = false;
+                for bytes in patched_blobs {
+                    match cx.text_system().add_fonts(vec![Cow::Owned(bytes)]) {
+                        Ok(()) => any_ok = true,
+                        Err(e) if err_msg.is_none() => {
+                            err_msg = Some(format!("Failed to load built font into preview: {e}"));
+                        }
+                        Err(_) => {}
+                    }
+                }
+                if any_ok {
+                    view.built_family = Some(preview_family.into());
+                }
+                view.load_error = err_msg;
                 cx.notify();
             });
         })
@@ -189,19 +341,33 @@ fn extract_family_name(bytes: &[u8]) -> Option<String> {
 
 impl Render for PreviewView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.source == PreviewSource::SelectedFonts {
-            self.ensure_selected_fonts_loaded(cx);
+        if self.state.read(cx).preview_built_requested {
+            self.source = PreviewSource::BuiltOutput;
+            self.state.update(cx, |s, _| {
+                s.preview_built_requested = false;
+            });
+        }
+
+        match self.source {
+            PreviewSource::BuiltOutput => self.ensure_built_fonts_loaded(cx),
+            PreviewSource::SelectedFonts => self.ensure_selected_fonts_loaded(cx),
+            PreviewSource::SystemSegoe => {}
         }
 
         let s = self.state.read(cx);
         let theme = s.theme();
+        let has_built = s.has_built_fonts;
         let is_focused = self.input.focus_handle.is_focused(window);
         if !is_focused && self.input._blink_task.is_some() {
             self.input.cursor_visible = true;
             self.input._blink_task = None;
         }
-        let has_selected = s.config.latin.has_regular();
+        let has_selected = self.has_selected;
         let active_family: SharedString = match self.source {
+            PreviewSource::BuiltOutput => self
+                .built_family
+                .clone()
+                .unwrap_or_else(|| "Segoe UI".into()),
             PreviewSource::SelectedFonts => self
                 .selected_family
                 .clone()
@@ -290,6 +456,19 @@ impl Render for PreviewView {
                             .flex()
                             .flex_wrap()
                             .gap(px(6.0))
+                            .child(
+                                VantageButton::new("prev-src-built", "Built Output", theme)
+                                    .variant(if self.source == PreviewSource::BuiltOutput {
+                                        ButtonVariant::Primary
+                                    } else {
+                                        ButtonVariant::Secondary
+                                    })
+                                    .disabled(!has_built)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.source = PreviewSource::BuiltOutput;
+                                        cx.notify();
+                                    })),
+                            )
                             .child(
                                 VantageButton::new("prev-src-sel", "Selected Font", theme)
                                     .variant(if self.source == PreviewSource::SelectedFonts {

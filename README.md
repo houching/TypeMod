@@ -1,4 +1,4 @@
-# SegoeUI Changer
+# TypeMod
 
 A native Windows desktop utility built with **Rust + GPUI** for replacing and merging Windows system fonts (`Segoe UI` / `Segoe UI Variable`), tuning system UI font sizes, and previewing multi-script typography.
 
@@ -39,8 +39,8 @@ cargo clippy --all-targets -- -D warnings
 cargo build --release
 ```
 
-When distributing the compiled binary, place the `scripts/` directory next to `segoeui-changer.exe` (the app resolves `scripts/` relative to the executable first, then the working directory).
+When distributing the compiled binary, `typemod.exe` bundles the Python scripts internally (and `scripts/` is also included alongside the release archive).
 
 ## CI / Releases
 
-GitHub Actions (`.github/workflows/release.yml`) runs `cargo test`, `cargo clippy --all-targets -- -D warnings`, builds `segoeui-changer.exe` in release mode on `windows-latest`, and packages `segoeui-changer.exe` + `scripts/` + `README.md` into `segoeui-changer-windows-x64.zip` (published automatically to GitHub Releases on `v*` tags).
+GitHub Actions (`.github/workflows/release.yml`) runs `cargo test`, `cargo clippy --all-targets -- -D warnings`, builds `typemod.exe` in release mode on `windows-latest`, and packages `typemod.exe` + `scripts/` + `README.md` into `typemod-windows-x64.zip` (published automatically to GitHub Releases on `v*` tags).

@@ -15,7 +15,7 @@ concurrency:
   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -38,7 +38,6 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: "check"
-          cache-on-failure: true
 
       - name: Run unit tests
         run: cargo test --locked
@@ -50,6 +49,8 @@ jobs:
     name: Build & Package Release (Windows x64)
     needs: check
     if: github.event_name != 'pull_request'
+    permissions:
+      contents: write
     runs-on: windows-latest
 
     steps:
@@ -63,7 +64,6 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: "release"
-          cache-on-failure: true
 
       - name: Build release binary
         run: cargo build --release --locked
@@ -71,28 +71,28 @@ jobs:
       - name: Package release archive & SHA256
         shell: pwsh
         run: |
-          $dist = "dist/segoeui-changer"
+          $dist = "dist/typemod"
           New-Item -ItemType Directory -Force -Path "$dist/scripts" | Out-Null
-          Copy-Item "target/release/segoeui-changer.exe" "$dist/"
+          Copy-Item "target/release/typemod.exe" "$dist/"
           Copy-Item "scripts/*.py" "$dist/scripts/"
           Copy-Item "README.md" "$dist/"
-          Compress-Archive -Path "$dist/*" -DestinationPath "segoeui-changer-windows-x64.zip" -CompressionLevel Optimal -Force
-          $hash = (Get-FileHash "segoeui-changer-windows-x64.zip" -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$hash  segoeui-changer-windows-x64.zip" | Out-File -Encoding ascii "segoeui-changer-windows-x64.zip.sha256"
+          Compress-Archive -Path "$dist/*" -DestinationPath "typemod-windows-x64.zip" -CompressionLevel Optimal -Force
+          $hash = (Get-FileHash "typemod-windows-x64.zip" -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  typemod-windows-x64.zip" | Out-File -Encoding ascii "typemod-windows-x64.zip.sha256"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: segoeui-changer-windows-x64
+          name: typemod-windows-x64
           path: |
-            segoeui-changer-windows-x64.zip
-            segoeui-changer-windows-x64.zip.sha256
+            typemod-windows-x64.zip
+            typemod-windows-x64.zip.sha256
 
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v3
         with:
           files: |
-            segoeui-changer-windows-x64.zip
-            segoeui-changer-windows-x64.zip.sha256
+            typemod-windows-x64.zip
+            typemod-windows-x64.zip.sha256
           generate_release_notes: true

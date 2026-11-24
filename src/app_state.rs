@@ -1,9 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, OnceLock};
 
+use gpui::SharedString;
 use serde::{Deserialize, Serialize};
 
 use crate::ui::theme::{ThemeMode, VantageTheme};
@@ -121,6 +122,7 @@ fn default_ui_scale_pct() -> u16 {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PersistedConfig {
     pub theme: ThemeMode,
     #[serde(default = "default_ui_scale_pct")]
@@ -133,18 +135,13 @@ pub struct PersistedConfig {
     pub show_log_drawer: bool,
     pub rail_pinned: bool,
     pub latin: FontFamilySelection,
-    #[serde(default)]
     pub secondary_script: SecondaryScript,
-    #[serde(default)]
     pub secondary_scripts: Vec<SecondaryScript>,
-    #[serde(default)]
     pub custom_fontforge_path: Option<PathBuf>,
     pub khmer: FontFamilySelection,
     pub latin_italic: FontFamilySelection,
     pub khmer_italic: FontFamilySelection,
-    #[serde(default)]
     pub extra_script_fonts: HashMap<SecondaryScript, FontFamilySelection>,
-    #[serde(default)]
     pub extra_script_italic_fonts: HashMap<SecondaryScript, FontFamilySelection>,
 }
 
@@ -292,12 +289,15 @@ pub struct AppState {
     pub is_admin: bool,
     pub system_state: SystemFontState,
     pub clones_installed: bool,
+    pub has_built_fonts: bool,
+    pub built_revision: u64,
+    pub preview_built_requested: bool,
     pub fontforge_path: Option<PathBuf>,
     pub is_busy: bool,
     pub cancel_flag: Option<Arc<AtomicBool>>,
     pub progress: f32,
     pub status_text: String,
-    pub build_log: Vec<String>,
+    pub build_log: VecDeque<SharedString>,
     pub last_error: Option<String>,
     pub last_notice: Option<String>,
     pub sizes: SystemFontSizes,
@@ -306,12 +306,41 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(state_override: Option<&Path>) -> Self {
-        let config = state_override
-            .and_then(|p| Self::load_config_from(p).ok())
-            .or_else(|| Self::load_default_config().ok())
-            .unwrap_or_default();
+        let mut notice = None;
+        let config = if let Some(p) = state_override {
+            match Self::load_config_from(p) {
+                Ok(c) => c,
+                Err(e) => {
+                    notice = Some(format!(
+                        "Failed to read passed state ({}); loaded default config.",
+                        e
+                    ));
+                    Self::load_default_config().unwrap_or_default()
+                }
+            }
+        } else {
+            let path = Self::config_path();
+            if path.exists() {
+                match Self::load_config_from(&path) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let bak = path.with_extension("json.bak");
+                        let _ = fs::copy(&path, &bak);
+                        notice = Some(format!(
+                            "Corrupt config.json backed up to {} and reset ({e}).",
+                            bak.display()
+                        ));
+                        PersistedConfig::default()
+                    }
+                }
+            } else {
+                PersistedConfig::default()
+            }
+        };
 
-        Self::from_config(config)
+        let mut state = Self::from_config(config);
+        state.last_notice = notice;
+        state
     }
 
     pub fn from_config(config: PersistedConfig) -> Self {
@@ -321,12 +350,15 @@ impl AppState {
             is_admin: false,
             system_state: SystemFontState::Original,
             clones_installed: false,
+            has_built_fonts: false,
+            built_revision: 0,
+            preview_built_requested: false,
             fontforge_path: None,
             is_busy: false,
             cancel_flag: None,
             progress: 0.0,
             status_text: "Ready".to_string(),
-            build_log: Vec::new(),
+            build_log: VecDeque::new(),
             last_error: None,
             last_notice: None,
             sizes: SystemFontSizes::default(),
@@ -347,19 +379,37 @@ impl AppState {
     }
 
     pub fn app_docs_dir() -> PathBuf {
-        let exe = std::env::current_exe().ok();
-        let exe_dir = exe
-            .as_deref()
-            .and_then(|p| p.parent())
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| PathBuf::from("."));
-        let app_stem = exe
-            .as_deref()
-            .and_then(|p| p.file_stem())
-            .map(|s| s.to_string_lossy().to_string())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "segoeui-changer".to_string());
-        exe_dir.join(format!("{app_stem}_data"))
+        static CACHE: OnceLock<PathBuf> = OnceLock::new();
+        CACHE
+            .get_or_init(|| {
+                let exe = std::env::current_exe().ok();
+                let exe_dir = exe
+                    .as_deref()
+                    .and_then(|p| p.parent())
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| PathBuf::from("."));
+                let app_stem = exe
+                    .as_deref()
+                    .and_then(|p| p.file_stem())
+                    .map(|s| s.to_string_lossy().to_string())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| "typemod".to_string());
+                let portable_dir = exe_dir.join(format!("{app_stem}_data"));
+
+                let under_program_files = is_system_managed_dir(&exe_dir);
+                if !under_program_files && is_dir_writable(&portable_dir) {
+                    return portable_dir;
+                }
+
+                if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+                    let local_dir = PathBuf::from(local).join("TypeMod");
+                    if is_dir_writable(&local_dir) {
+                        return local_dir;
+                    }
+                }
+                portable_dir
+            })
+            .clone()
     }
 
     pub fn config_path() -> PathBuf {
@@ -377,7 +427,7 @@ impl AppState {
     }
 
     pub fn save_temp_state(&self) -> anyhow::Result<PathBuf> {
-        let dir = Self::app_docs_dir();
+        let dir = std::env::temp_dir();
         fs::create_dir_all(&dir)?;
         let temp_path = dir.join(format!("temp_state_{}.json", std::process::id()));
         let json = serde_json::to_string_pretty(&self.config)?;
@@ -394,12 +444,37 @@ impl AppState {
         Ok(serde_json::from_str(&raw)?)
     }
 
-    pub fn push_log(&mut self, line: impl Into<String>) {
-        self.build_log.push(line.into());
-        if self.build_log.len() > 2000 {
-            let drain_count = self.build_log.len() - 2000;
-            self.build_log.drain(0..drain_count);
+    pub fn push_log(&mut self, line: impl Into<SharedString>) {
+        if self.build_log.len() >= 2000 {
+            self.build_log.pop_front();
         }
+        self.build_log.push_back(line.into());
+    }
+}
+
+fn is_system_managed_dir(dir: &Path) -> bool {
+    let dir_lc = dir.to_string_lossy().to_ascii_lowercase();
+    for env_key in ["ProgramFiles", "ProgramFiles(x86)", "ProgramW6432", "SystemRoot"] {
+        if let Some(val) = std::env::var_os(env_key) {
+            let base = PathBuf::from(val).to_string_lossy().to_ascii_lowercase();
+            if !base.is_empty() && dir_lc.starts_with(&base) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn is_dir_writable(dir: &Path) -> bool {
+    if fs::create_dir_all(dir).is_err() {
+        return false;
+    }
+    let probe = dir.join(format!(".write_probe_{}", std::process::id()));
+    if fs::write(&probe, b"").is_ok() {
+        let _ = fs::remove_file(&probe);
+        true
+    } else {
+        false
     }
 }
 
@@ -416,5 +491,14 @@ mod tests {
         s.config.ui_scale_pct = 260;
         assert_eq!(s.clamped_ui_scale_pct(), 200);
         assert!((s.ui_rem_size() - 32.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn persisted_config_defaults_missing_fields() {
+        let cfg: PersistedConfig = serde_json::from_str(r#"{"enable_italic":true}"#).unwrap();
+        assert!(cfg.enable_italic);
+        assert_eq!(cfg.ui_scale_pct, 100);
+        assert_eq!(cfg.secondary_script, SecondaryScript::Khmer);
+        assert!(cfg.rail_pinned);
     }
 }
