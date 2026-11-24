@@ -324,18 +324,8 @@ pub fn vertical_scrollbar(
     id: impl Into<gpui::ElementId>,
     theme: VantageTheme,
 ) -> gpui::AnyElement {
-    let max_y: f32 = handle.max_offset().height.into();
-    if max_y <= 1.0 {
-        return div().into_any_element();
-    }
-    let bounds = handle.bounds();
-    let view_h: f32 = bounds.size.height.into();
-    let view_h = if view_h > 1.0 { view_h } else { 400.0 };
-    let content_h = view_h + max_y;
-    let thumb_frac = (view_h / content_h).clamp(0.10, 1.0);
-    let scroll_y = (-f32::from(handle.offset().y)).clamp(0.0, max_y);
-    let top_frac = (scroll_y / max_y) * (1.0 - thumb_frac);
-    let handle_clone = handle.clone();
+    let handle_click = handle.clone();
+    let handle_paint = handle.clone();
 
     div()
         .id(id)
@@ -344,25 +334,66 @@ pub fn vertical_scrollbar(
         .bottom(px(4.0))
         .right(px(3.0))
         .w(px(6.0))
-        .rounded(px(3.0))
-        .bg(theme.line.opacity(0.35))
         .cursor_pointer()
         .on_mouse_down(gpui::MouseButton::Left, move |ev, _window, _cx| {
+            let max_y: f32 = handle_click.max_offset().height.into();
+            if max_y <= 1.0 {
+                return;
+            }
+            let bounds = handle_click.bounds();
+            let view_h: f32 = bounds.size.height.into();
+            let view_h = if view_h > 1.0 { view_h } else { 400.0 };
             let track_top: f32 = bounds.top().into();
             let click_y: f32 = ev.position.y.into();
             let ratio = ((click_y - track_top) / view_h).clamp(0.0, 1.0);
             let target_y = (ratio * max_y).clamp(0.0, max_y);
-            handle_clone.set_offset(gpui::Point::new(px(0.0), px(-target_y)));
+            handle_click.set_offset(gpui::Point::new(px(0.0), px(-target_y)));
         })
         .child(
-            div()
-                .absolute()
-                .left_0()
-                .right_0()
-                .top(gpui::relative(top_frac))
-                .h(gpui::relative(thumb_frac))
-                .rounded(px(3.0))
-                .bg(theme.text_3.opacity(0.65)),
+            gpui::canvas(
+                |_, _, _| {},
+                move |track_bounds, _, window, _cx| {
+                    let max_y: f32 = handle_paint.max_offset().height.into();
+                    if max_y <= 1.0 {
+                        return;
+                    }
+                    let view_h: f32 = handle_paint.bounds().size.height.into();
+                    let view_h = if view_h > 1.0 {
+                        view_h
+                    } else {
+                        f32::from(track_bounds.size.height).max(1.0)
+                    };
+                    let content_h = view_h + max_y;
+                    let thumb_frac = (view_h / content_h).clamp(0.10, 1.0);
+                    let scroll_y = (-f32::from(handle_paint.offset().y)).clamp(0.0, max_y);
+                    let top_frac = (scroll_y / max_y) * (1.0 - thumb_frac);
+
+                    window.paint_quad(gpui::quad(
+                        track_bounds,
+                        gpui::Corners::all(px(3.0)),
+                        theme.line.opacity(0.35),
+                        gpui::Edges::default(),
+                        gpui::transparent_black(),
+                        gpui::BorderStyle::Solid,
+                    ));
+
+                    let thumb_h = track_bounds.size.height * thumb_frac;
+                    let thumb_y = track_bounds.origin.y + track_bounds.size.height * top_frac;
+                    let thumb_bounds = gpui::Bounds::new(
+                        gpui::Point::new(track_bounds.origin.x, thumb_y),
+                        gpui::Size::new(track_bounds.size.width, thumb_h),
+                    );
+                    window.paint_quad(gpui::quad(
+                        thumb_bounds,
+                        gpui::Corners::all(px(3.0)),
+                        theme.text_3.opacity(0.65),
+                        gpui::Edges::default(),
+                        gpui::transparent_black(),
+                        gpui::BorderStyle::Solid,
+                    ));
+                },
+            )
+            .size_full(),
         )
         .into_any_element()
 }

@@ -67,11 +67,16 @@ impl SettingsView {
         let ratio = (rel_x / width).clamp(0.0, 1.0);
         let pct = (80 + ((ratio * 24.0).round() as u16) * 5).clamp(80, 200);
         self.state.update(cx, |s, cx| {
-            s.config.ui_scale_pct = pct;
-            if save {
-                let _ = s.save_config();
+            let changed = s.config.ui_scale_pct != pct;
+            if changed {
+                s.config.ui_scale_pct = pct;
             }
-            cx.notify();
+            if save {
+                s.save_config_async(cx.background_executor());
+            }
+            if changed {
+                cx.notify();
+            }
         });
     }
 
@@ -85,7 +90,7 @@ impl SettingsView {
                 "show_log" => s.config.show_log_drawer = !s.config.show_log_drawer,
                 _ => {}
             }
-            let _ = s.save_config();
+            s.save_config_async(cx.background_executor());
             cx.notify();
         });
     }
@@ -93,7 +98,7 @@ impl SettingsView {
     fn set_merging_mode(&self, mode: MergingMode, cx: &mut Context<Self>) {
         self.state.update(cx, |s, cx| {
             s.config.merging_mode = mode;
-            let _ = s.save_config();
+            s.save_config_async(cx.background_executor());
             cx.notify();
         });
     }
@@ -101,7 +106,7 @@ impl SettingsView {
     fn set_theme(&self, mode: ThemeMode, cx: &mut Context<Self>) {
         self.state.update(cx, |s, cx| {
             s.config.theme = mode;
-            let _ = s.save_config();
+            s.save_config_async(cx.background_executor());
             cx.notify();
         });
     }
@@ -403,7 +408,6 @@ impl Render for SettingsView {
             .min_w_0()
             .flex()
             .flex_col()
-            .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify()))
             .on_mouse_move(cx.listener(|this, ev: &gpui::MouseMoveEvent, _, cx| {
                 if this.is_dragging_dpi && ev.pressed_button == Some(MouseButton::Left) {
                     this.update_dpi_from_pos(ev.position, false, cx);
@@ -624,7 +628,7 @@ impl Render for SettingsView {
                                             .on_click(cx.listener(|this, _, _, cx| {
                                                 this.state.update(cx, |s, cx| {
                                                     s.config.ui_scale_pct = 100;
-                                                    let _ = s.save_config();
+                                                    s.save_config_async(cx.background_executor());
                                                     cx.notify();
                                                 });
                                             })),
@@ -934,7 +938,7 @@ impl Render for SettingsView {
                                                                 Some(path.clone());
                                                             s.fontforge_path = Some(path);
                                                             s.last_error = None;
-                                                            let _ = s.save_config();
+                                                            s.save_config_async(cx.background_executor());
                                                         }
                                                         Err(msg) => {
                                                             s.last_error = Some(msg);

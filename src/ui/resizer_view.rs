@@ -149,7 +149,6 @@ impl Render for ResizerView {
             .min_h_0()
             .flex()
             .flex_col()
-            .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify()))
             .child(
                 div()
                     .id("resizer-scroll")

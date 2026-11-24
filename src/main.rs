@@ -189,24 +189,45 @@ fn main() {
         .with_assets(ui::icons::EmbeddedAssets)
         .run(move |cx: &mut App| {
         let state = cx.new(|_| {
-            let mut s = AppState::new(state_arg.as_deref());
+            let s = AppState::new(state_arg.as_deref());
             if let Some(ref temp_path) = state_arg
                 && is_valid_temp_state_file(temp_path)
             {
                 let _ = std::fs::remove_file(temp_path);
             }
-            s.is_admin = is_admin();
-            s.system_state = check_system_state();
-            s.clones_installed = are_clones_installed();
-            s.has_built_fonts = has_built_fonts();
-            s.fontforge_path =
-                resolve_trusted_fontforge(s.config.custom_fontforge_path.as_deref());
-            if let Ok(metrics) = get_current_metrics() {
-                s.uniform_pt = metrics.message;
-                s.sizes = metrics;
-            }
             s
         });
+
+        let custom_ff = state.read(cx).config.custom_fontforge_path.clone();
+        let state_bg = state.clone();
+        cx.spawn(async move |cx| {
+            let (admin, sys_state, clones, built, ff_path, metrics) = cx
+                .background_executor()
+                .spawn(async move {
+                    (
+                        is_admin(),
+                        check_system_state(),
+                        are_clones_installed(),
+                        has_built_fonts(),
+                        resolve_trusted_fontforge(custom_ff.as_deref()),
+                        get_current_metrics().ok(),
+                    )
+                })
+                .await;
+            let _ = state_bg.update(cx, |s, cx| {
+                s.is_admin = admin;
+                s.system_state = sys_state;
+                s.clones_installed = clones;
+                s.has_built_fonts = built;
+                s.fontforge_path = ff_path;
+                if let Some(m) = metrics {
+                    s.uniform_pt = m.message;
+                    s.sizes = m;
+                }
+                cx.notify();
+            });
+        })
+        .detach();
 
         let bounds = Bounds::centered(None, size(px(1140.0), px(780.0)), cx);
         cx.open_window(

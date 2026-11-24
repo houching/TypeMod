@@ -1,6 +1,6 @@
 use gpui::{
-    Context, Entity, InteractiveElement, IntoElement, ParentElement, Render,
-    StatefulInteractiveElement, Styled, Window, div, px,
+    Context, Entity, IntoElement, ParentElement, Render, Styled, UniformListScrollHandle, Window,
+    div, px, uniform_list,
 };
 
 use crate::app_state::AppState;
@@ -9,7 +9,7 @@ use crate::ui::components::{ButtonVariant, VantageButton};
 pub struct LogDrawer {
     state: Entity<AppState>,
     copied: bool,
-    scroll_handle: gpui::ScrollHandle,
+    scroll_handle: UniformListScrollHandle,
 }
 
 impl LogDrawer {
@@ -17,7 +17,7 @@ impl LogDrawer {
         Self {
             state,
             copied: false,
-            scroll_handle: gpui::ScrollHandle::new(),
+            scroll_handle: UniformListScrollHandle::new(),
         }
     }
 }
@@ -29,8 +29,7 @@ impl Render for LogDrawer {
             return div().into_any_element();
         }
         let theme = s.theme();
-        let lines: Vec<gpui::SharedString> =
-            s.build_log.iter().rev().take(200).rev().cloned().collect();
+        let line_count = s.build_log.len();
 
         div()
             .h(px(190.0))
@@ -109,7 +108,7 @@ impl Render for LogDrawer {
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.state.update(cx, |s, cx| {
                                             s.config.show_log_drawer = false;
-                                            let _ = s.save_config();
+                                            s.save_config_async(cx.background_executor());
                                             cx.notify();
                                         });
                                     })),
@@ -123,45 +122,47 @@ impl Render for LogDrawer {
                     .min_h_0()
                     .flex()
                     .flex_col()
-                    .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify()))
-                    .child(
+                    .bg(theme.bg)
+                    .border_1()
+                    .border_color(theme.line)
+                    .rounded(px(6.0))
+                    .p(px(8.0))
+                    .child(if line_count == 0 {
                         div()
-                            .id("log-scroll")
-                            .flex_1()
-                            .min_h_0()
-                            .overflow_y_scroll()
-                            .track_scroll(&self.scroll_handle)
-                            .bg(theme.bg)
-                            .border_1()
-                            .border_color(theme.line)
-                            .rounded(px(6.0))
-                            .p(px(8.0))
-                            .flex()
-                            .flex_col()
-                            .gap(px(2.0))
-                            .children(if lines.is_empty() {
-                                vec![
-                                    div()
-                                        .text_xs()
-                                        .text_color(theme.text_3)
-                                        .child("No build output yet.")
-                                        .into_any_element(),
-                                ]
-                            } else {
-                                lines
-                                    .into_iter()
-                                    .map(|line| {
-                                        div()
-                                            .text_xs()
-                                            .text_color(theme.text_2)
-                                            .child(line)
-                                            .into_any_element()
+                            .text_xs()
+                            .text_color(theme.text_3)
+                            .child("No build output yet.")
+                            .into_any_element()
+                    } else {
+                        uniform_list(
+                            "log-scroll-list",
+                            line_count,
+                            cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
+                                let log = &this.state.read(cx).build_log;
+                                range
+                                    .filter_map(|idx| {
+                                        let line = log.get(idx)?.clone();
+                                        Some(
+                                            div()
+                                                .h(px(18.0))
+                                                .flex()
+                                                .items_center()
+                                                .text_xs()
+                                                .text_color(theme.text_2)
+                                                .truncate()
+                                                .child(line),
+                                        )
                                     })
-                                    .collect()
+                                    .collect::<Vec<_>>()
                             }),
-                    )
+                        )
+                        .flex_1()
+                        .min_h_0()
+                        .track_scroll(self.scroll_handle.clone())
+                        .into_any_element()
+                    })
                     .child(crate::ui::components::vertical_scrollbar(
-                        &self.scroll_handle,
+                        &self.scroll_handle.0.borrow().base_handle,
                         "log-scroll-bar",
                         theme,
                     )),

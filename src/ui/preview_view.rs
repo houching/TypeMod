@@ -47,6 +47,7 @@ impl PreviewView {
             input: TextFieldState::new(
                 "សួស្តីកម្ពុជា — ភាសាខ្មែរ និង English UI 0123456789",
                 cx.focus_handle(),
+                cx,
             ),
             loaded_paths: HashSet::new(),
             last_candidates: Vec::new(),
@@ -62,32 +63,7 @@ impl PreviewView {
     }
 
     fn start_blink(&mut self, cx: &mut Context<Self>) {
-        self.input.cursor_visible = true;
-        if self.input._blink_task.is_some() {
-            return;
-        }
-        self.input._blink_task = Some(cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(530))
-                    .await;
-                let keep_going = this
-                    .update(cx, |view, cx| {
-                        if view.state.read(cx).active_tab != crate::app_state::NavTab::Preview {
-                            view.input.cursor_visible = true;
-                            view.input._blink_task = None;
-                            return false;
-                        }
-                        view.input.cursor_visible = !view.input.cursor_visible;
-                        cx.notify();
-                        true
-                    })
-                    .unwrap_or(false);
-                if !keep_going {
-                    break;
-                }
-            }
-        }));
+        self.input.start_blink(cx);
     }
 
     fn ensure_selected_fonts_loaded(&mut self, cx: &mut Context<Self>) {
@@ -358,9 +334,8 @@ impl Render for PreviewView {
         let theme = s.theme();
         let has_built = s.has_built_fonts;
         let is_focused = self.input.focus_handle.is_focused(window);
-        if !is_focused && self.input._blink_task.is_some() {
-            self.input.cursor_visible = true;
-            self.input._blink_task = None;
+        if !is_focused {
+            self.input.stop_blink(cx);
         }
         let has_selected = self.has_selected;
         let active_family: SharedString = match self.source {
@@ -399,10 +374,10 @@ impl Render for PreviewView {
         ];
 
         let size_px = self.font_size_px;
-        let sample = if self.input.text.is_empty() {
-            "Type custom text above to preview...".to_string()
+        let sample: SharedString = if self.input.text.is_empty() {
+            "Type custom text above to preview...".into()
         } else {
-            self.input.text.clone()
+            self.input.text.clone().into()
         };
 
         div()
@@ -411,7 +386,6 @@ impl Render for PreviewView {
             .min_h_0()
             .flex()
             .flex_col()
-            .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify()))
             .child(
                 div()
                     .id("preview-scroll")
@@ -534,13 +508,22 @@ impl Render for PreviewView {
                                         )
                                         .variant(ButtonVariant::Ghost)
                                         .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.input.set_text(text);
+                                            this.input.set_text(text, cx);
                                             cx.notify();
                                         }))
                                     })),
                             ),
                     )
-                    .child(
+                    .child({
+                        let on_focus = cx.listener(|this, _, window, cx| {
+                            window.focus(&this.input.focus_handle);
+                            this.start_blink(cx);
+                            cx.notify();
+                        });
+                        let on_clear = cx.listener(|this, _, _, cx| {
+                            this.input.clear(cx);
+                            cx.notify();
+                        });
                         self.input.render_box(
                             TextBoxProps {
                                 id: "preview-text-input".into(),
@@ -551,17 +534,11 @@ impl Render for PreviewView {
                                 is_focused,
                                 theme,
                             },
-                            cx.listener(|this, _, window, cx| {
-                                window.focus(&this.input.focus_handle);
-                                this.start_blink(cx);
-                                cx.notify();
-                            }),
-                            cx.listener(|this, _, _, cx| {
-                                this.input.clear();
-                                cx.notify();
-                            }),
-                        ),
-                    )
+                            cx,
+                            on_focus,
+                            on_clear,
+                        )
+                    })
                     .child(
                         div()
                             .flex()

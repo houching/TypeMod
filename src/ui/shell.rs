@@ -91,7 +91,7 @@ impl ShellView {
     fn toggle_rail(&self, cx: &mut Context<Self>) {
         self.state.update(cx, |s, cx| {
             s.config.rail_pinned = !s.config.rail_pinned;
-            let _ = s.save_config();
+            s.save_config_async(cx.background_executor());
             cx.notify();
         });
     }
@@ -102,7 +102,7 @@ impl ShellView {
                 ThemeMode::Dark => ThemeMode::Light,
                 ThemeMode::Light => ThemeMode::Dark,
             };
-            let _ = s.save_config();
+            s.save_config_async(cx.background_executor());
             cx.notify();
         });
     }

@@ -47,7 +47,7 @@ pub struct HomeView {
     script_dropdown_open: bool,
     scroll_handle: gpui::ScrollHandle,
     path_exists_cache: HashMap<PathBuf, bool>,
-    last_checked_paths: Vec<PathBuf>,
+    last_config_rev: Option<u64>,
     exists_check_gen: u64,
 }
 
@@ -74,7 +74,7 @@ impl HomeView {
             script_dropdown_open: false,
             scroll_handle: gpui::ScrollHandle::new(),
             path_exists_cache: HashMap::new(),
-            last_checked_paths: Vec::new(),
+            last_config_rev: None,
             exists_check_gen: 0,
         }
     }
@@ -84,6 +84,13 @@ impl HomeView {
     }
 
     fn refresh_path_cache(&mut self, force: bool, cx: &mut Context<Self>) {
+        let rev = self.state.read(cx).config_revision;
+        if !force && self.last_config_rev == Some(rev) {
+            return;
+        }
+        self.last_config_rev = Some(rev);
+
+        let mut seen = std::collections::HashSet::new();
         let mut paths = Vec::new();
         {
             let cfg = &self.state.read(cx).config;
@@ -99,7 +106,7 @@ impl HomeView {
                 .into_iter()
                 .flatten()
                 {
-                    if !paths.contains(p) {
+                    if seen.insert(p.clone()) {
                         paths.push(p.clone());
                     }
                 }
@@ -115,10 +122,6 @@ impl HomeView {
                 push_sel(sel);
             }
         }
-        if !force && paths == self.last_checked_paths {
-            return;
-        }
-        self.last_checked_paths = paths.clone();
         self.exists_check_gen += 1;
         let req_gen = self.exists_check_gen;
         cx.spawn(async move |this, cx| {
@@ -168,7 +171,7 @@ impl HomeView {
                     }
                     *slot.select_mut(&mut s.config) = detected;
                     s.last_error = None;
-                    let _ = s.save_config();
+                    s.save_config_async(cx.background_executor());
                     cx.notify();
                 });
                 view.refresh_path_cache(true, cx);
@@ -201,7 +204,7 @@ impl HomeView {
                         WeightKind::Bold => target.bold = Some(path),
                         WeightKind::Black => target.black = Some(path),
                     }
-                    let _ = s.save_config();
+                    s.save_config_async(cx.background_executor());
                     cx.notify();
                 });
             });
@@ -212,7 +215,7 @@ impl HomeView {
     fn clear_slot(&self, slot: FontTargetSlot, cx: &mut Context<Self>) {
         self.state.update(cx, |s, cx| {
             slot.select_mut(&mut s.config).clear();
-            let _ = s.save_config();
+            s.save_config_async(cx.background_executor());
             cx.notify();
         });
     }
@@ -312,16 +315,20 @@ impl HomeView {
                 }
                 if !batch.is_empty() {
                     let _ = state.update(cx, |s, cx| {
+                        let mut should_notify = s.config.show_log_drawer;
                         for ev in batch {
                             match ev {
                                 BuildProgressEvent::Step { progress, status } => {
                                     s.progress = progress;
                                     s.status_text = status;
+                                    should_notify = true;
                                 }
                                 BuildProgressEvent::Log(line) => s.push_log(line),
                             }
                         }
-                        cx.notify();
+                        if should_notify {
+                            cx.notify();
+                        }
                     });
                 }
                 if done_msg.is_some() || disconnected {
@@ -995,7 +1002,7 @@ impl Render for HomeView {
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             this.state.update(cx, |s, cx| {
                                                 s.config.toggle_secondary_script(script);
-                                                let _ = s.save_config();
+                                                s.save_config_async(cx.background_executor());
                                                 cx.notify();
                                             });
                                         }))
@@ -1077,7 +1084,6 @@ impl Render for HomeView {
             .min_h_0()
             .flex()
             .flex_col()
-            .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify()))
             .child(
                 div()
                     .id("home-scroll")

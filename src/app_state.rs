@@ -291,6 +291,7 @@ pub struct AppState {
     pub clones_installed: bool,
     pub has_built_fonts: bool,
     pub built_revision: u64,
+    pub config_revision: u64,
     pub preview_built_requested: bool,
     pub fontforge_path: Option<PathBuf>,
     pub is_busy: bool,
@@ -352,6 +353,7 @@ impl AppState {
             clones_installed: false,
             has_built_fonts: false,
             built_revision: 0,
+            config_revision: 0,
             preview_built_requested: false,
             fontforge_path: None,
             is_busy: false,
@@ -424,6 +426,21 @@ impl AppState {
         let json = serde_json::to_string_pretty(&self.config)?;
         fs::write(path, json)?;
         Ok(())
+    }
+
+    pub fn save_config_async(&mut self, executor: &gpui::BackgroundExecutor) {
+        self.config_revision = self.config_revision.wrapping_add(1);
+        let path = Self::config_path();
+        if let Ok(json) = serde_json::to_string_pretty(&self.config) {
+            executor
+                .spawn(async move {
+                    if let Some(parent) = path.parent() {
+                        let _ = fs::create_dir_all(parent);
+                    }
+                    let _ = fs::write(path, json);
+                })
+                .detach();
+        }
     }
 
     pub fn save_temp_state(&self) -> anyhow::Result<PathBuf> {

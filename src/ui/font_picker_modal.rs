@@ -67,7 +67,7 @@ impl FontPickerModal {
         Self {
             is_open: false,
             target: FontTargetSlot::Latin,
-            input: TextFieldState::new("", cx.focus_handle()),
+            input: TextFieldState::new("", cx.focus_handle(), cx),
             fonts: Vec::new(),
             fonts_lc: Vec::new(),
             cached_installed: None,
@@ -110,32 +110,12 @@ impl FontPickerModal {
     }
 
     fn start_blink(&mut self, cx: &mut Context<Self>) {
-        self.input.cursor_visible = true;
-        self.input._blink_task = Some(cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(530))
-                    .await;
-                let keep_going = this
-                    .update(cx, |modal, cx| {
-                        if !modal.is_open {
-                            return false;
-                        }
-                        modal.input.cursor_visible = !modal.input.cursor_visible;
-                        cx.notify();
-                        true
-                    })
-                    .unwrap_or(false);
-                if !keep_going {
-                    break;
-                }
-            }
-        }));
+        self.input.start_blink(cx);
     }
 
     pub fn open(&mut self, target: FontTargetSlot, window: &mut Window, cx: &mut Context<Self>) {
         self.target = target;
-        self.input.clear();
+        self.input.clear(cx);
         self.selected_idx = 0;
         self.open_gen += 1;
         let req_gen = self.open_gen;
@@ -176,7 +156,7 @@ impl FontPickerModal {
 
     pub fn close(&mut self, cx: &mut Context<Self>) {
         self.is_open = false;
-        self.input._blink_task = None;
+        self.input.stop_blink(cx);
         cx.notify();
     }
 
@@ -249,7 +229,7 @@ impl FontPickerModal {
                     return;
                 }
                 *target.select_mut(&mut s.config) = detected;
-                let _ = s.save_config();
+                s.save_config_async(cx.background_executor());
                 cx.notify();
             });
         })
@@ -342,7 +322,19 @@ impl Render for FontPickerModal {
                                     .on_click(cx.listener(|this, _, _, cx| this.close(cx))),
                             ),
                     )
-                    .child(
+                    .child({
+                        let on_focus = cx.listener(|this, _, window, cx| {
+                            window.focus(&this.input.focus_handle);
+                            this.start_blink(cx);
+                            cx.stop_propagation();
+                            cx.notify();
+                        });
+                        let on_clear = cx.listener(|this, _, _, cx| {
+                            this.input.clear(cx);
+                            this.selected_idx = 0;
+                            this.filter_dirty = true;
+                            cx.notify();
+                        });
                         self.input.render_box(
                             TextBoxProps {
                                 id: "picker-search-box".into(),
@@ -353,20 +345,11 @@ impl Render for FontPickerModal {
                                 is_focused,
                                 theme,
                             },
-                            cx.listener(|this, _, window, cx| {
-                                window.focus(&this.input.focus_handle);
-                                this.start_blink(cx);
-                                cx.stop_propagation();
-                                cx.notify();
-                            }),
-                            cx.listener(|this, _, _, cx| {
-                                this.input.clear();
-                                this.selected_idx = 0;
-                                this.filter_dirty = true;
-                                cx.notify();
-                            }),
-                        ),
-                    )
+                            cx,
+                            on_focus,
+                            on_clear,
+                        )
+                    })
                     .child(
                         div()
                             .relative()
@@ -379,7 +362,6 @@ impl Render for FontPickerModal {
                             .rounded(px(6.0))
                             .bg(theme.bg)
                             .p(px(6.0))
-                            .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify()))
                             .child(
                                 uniform_list(
                                     "font-picker-list",
