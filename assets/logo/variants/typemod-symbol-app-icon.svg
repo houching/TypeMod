@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256"><title>TypeMod symbol</title><rect width="256" height="256" rx="57.6" fill="#4C77F7"/><g transform="translate(33.92 33.92) scale(0.735)" fill="#FFFFFF">
+  <title id="title-tm-sym-small">TypeMod symbol (small-size cut)</title>
+  <!-- Small-size cut (16-24 px): widened 38px channels (y=72..110, x=72..110)
+       so the three modular blocks remain cleanly separated at 16 px. -->
+  <g id="symbol">
+    <path fill="#FFFFFF" d="M 20 56 A 36 36 0 0 1 56 20 H 200 A 36 36 0 0 1 236 56 V 72 H 20 Z"/>
+    <path fill="#FFFFFF" d="M 20 110 H 72 V 236 H 56 A 36 36 0 0 1 20 200 Z"/>
+    <path fill="#FFFFFF" d="M 110 110 H 236 V 200 A 36 36 0 0 1 200 236 H 110 Z"/>
+  </g>
+</g></svg>

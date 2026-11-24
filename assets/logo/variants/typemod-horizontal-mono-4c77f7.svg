@@ -1,0 +1,17 @@
+<svg fill="#4c77f7" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 737 256" width="737" height="256" role="img" aria-labelledby="t"><title>TypeMod logo</title>
+  <title id="t">TypeMod horizontal lockup</title>
+  <g id="symbol">
+    <path fill="#4c77f7" d="M 24 56 A 32 32 0 0 1 56 24 H 200 A 32 32 0 0 1 232 56 V 76 H 24 Z"/>
+    <path fill="#4c77f7" d="M 24 108 H 72 V 232 H 56 A 32 32 0 0 1 24 200 Z"/>
+    <path fill="#4c77f7" d="M 104 108 H 232 V 200 A 32 32 0 0 1 200 232 H 104 Z"/>
+  </g>
+  <g id="wordmark">
+  <path fill="#4c77f7" transform="translate(272.00,92.00) scale(1.1800)" d="M 0 0 H 42 V 11 H 26.5 V 60 H 15.5 V 11 H 0 Z"/>
+  <path fill="#4c77f7" transform="translate(334.54,92.00) scale(1.1800)" d="M 0 0 H 12 L 22 24 L 32 0 H 44 L 27.5 35 V 60 H 16.5 V 35 Z"/>
+  <path fill="#4c77f7" fill-rule="evenodd" transform="translate(399.44,92.00) scale(1.1800)" d="M 0 0 H 32 A 10 10 0 0 1 42 10 V 26 A 10 10 0 0 1 32 36 H 11 V 60 H 0 Z M 11 11 V 25 H 31 V 11 Z"/>
+  <path fill="#4c77f7" transform="translate(461.98,92.00) scale(1.1800)" d="M 0 0 H 38 V 11 H 11 V 24 H 33 V 35 H 11 V 49 H 38 V 60 H 0 Z"/>
+  <path fill="#4c77f7" transform="translate(519.80,92.00) scale(1.1800)" d="M 0 0 H 12 L 25 28 L 38 0 H 50 V 60 H 39 V 22 L 28 45 H 22 L 11 22 V 60 H 0 Z"/>
+  <path fill="#4c77f7" fill-rule="evenodd" transform="translate(591.78,92.00) scale(1.1800)" d="M 10 0 H 34 A 10 10 0 0 1 44 10 V 50 A 10 10 0 0 1 34 60 H 10 A 10 10 0 0 1 0 50 V 10 A 10 10 0 0 1 10 0 Z M 11 11 V 49 H 33 V 11 Z"/>
+  <path fill="#4c77f7" fill-rule="evenodd" transform="translate(656.68,92.00) scale(1.1800)" d="M 0 0 H 32 A 12 12 0 0 1 44 12 V 48 A 12 12 0 0 1 32 60 H 0 Z M 11 11 V 49 H 31 A 3 3 0 0 0 33 47 V 13 A 3 3 0 0 0 31 11 Z"/>
+  </g>
+</svg>

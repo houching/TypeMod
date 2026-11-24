@@ -1,0 +1,8 @@
+<svg fill="#000000" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-labelledby="title-tm-sym"><title>TypeMod symbol</title>
+  <title id="title-tm-sym">TypeMod symbol</title>
+  <g id="symbol">
+    <path fill="#000000" d="M 24 56 A 32 32 0 0 1 56 24 H 200 A 32 32 0 0 1 232 56 V 76 H 24 Z"/>
+    <path fill="#000000" d="M 24 108 H 72 V 232 H 56 A 32 32 0 0 1 24 200 Z"/>
+    <path fill="#000000" d="M 104 108 H 232 V 200 A 32 32 0 0 1 200 232 H 104 Z"/>
+  </g>
+</svg>

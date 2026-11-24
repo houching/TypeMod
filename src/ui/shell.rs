@@ -60,8 +60,7 @@ impl ShellView {
         let ui_font_family = pick_safe_ui_font(cx);
         let logo_img = Arc::new(Image::from_bytes(
             ImageFormat::Png,
-            include_bytes!("../../assets/logo/variants/segoeui-changer-symbol-app-icon-64.png")
-                .to_vec(),
+            include_bytes!("../../assets/logo/variants/typemod-symbol-app-icon-64.png").to_vec(),
         ));
 
         let _sub = cx.observe(&state, |_, _, cx| cx.notify());
