@@ -55,7 +55,7 @@ impl ShellView {
         let home = cx.new(|_| HomeView::new(state.clone(), picker.clone(), confirm_modal.clone()));
         let preview = cx.new(|cx| PreviewView::new(state.clone(), cx));
         let resizer = cx.new(|_| ResizerView::new(state.clone()));
-        let settings = cx.new(|cx| SettingsView::new(state.clone(), confirm_modal.clone(), cx));
+        let settings = cx.new(|cx| SettingsView::new(state.clone(), cx));
         let log_drawer = cx.new(|_| LogDrawer::new(state.clone()));
         let ui_font_family = pick_safe_ui_font(cx);
         let logo_img = Arc::new(Image::from_bytes(

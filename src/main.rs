@@ -12,41 +12,79 @@ use gpui::{
 };
 
 use app_state::{AppState, SystemFontState};
+use domain::backup_cloner::import_and_apply_package;
 use domain::builder::{
-    BuildProgressEvent, has_built_fonts, resolve_trusted_fontforge, run_build_and_apply,
+    BuildProgressEvent, apply_built_fonts_from_dir, built_fonts_dir, has_built_fonts,
+    resolve_trusted_fontforge, run_build_and_apply,
 };
 use domain::elevation::is_admin;
-use domain::registry::{are_clones_installed, check_system_state};
+use domain::registry::{are_clones_installed, check_system_state, restore_original_fonts};
 use domain::resizer::get_current_metrics;
 use ui::shell::ShellView;
 
-fn parse_args() -> anyhow::Result<(Option<PathBuf>, bool)> {
+enum HelperAction {
+    Gui,
+    CliBuild,
+    ApplyBuilt { work_dir: Option<PathBuf> },
+    Restore { delete_clones: bool },
+    ImportZip { zip_path: PathBuf },
+}
+
+fn parse_flag_value(
+    args: &mut impl Iterator<Item = std::ffi::OsString>,
+    flag: &str,
+) -> anyhow::Result<PathBuf> {
+    let Some(val) = args.next() else {
+        anyhow::bail!("Missing path value after {flag}");
+    };
+    let val_str = val.to_string_lossy();
+    if val_str.is_empty() || val_str.starts_with("--") {
+        anyhow::bail!("Invalid path value after {flag}: {val_str}");
+    }
+    Ok(PathBuf::from(val))
+}
+
+fn parse_args() -> anyhow::Result<(Option<PathBuf>, HelperAction)> {
     let mut state_arg: Option<PathBuf> = None;
-    let mut cli_build = false;
+    let mut action = HelperAction::Gui;
+    let mut work_dir: Option<PathBuf> = None;
+    let mut delete_clones = false;
     let mut args = std::env::args_os().skip(1);
     while let Some(arg) = args.next() {
         let s = arg.to_string_lossy();
         if s == "--state" {
-            let Some(val) = args.next() else {
-                anyhow::bail!("Missing path value after --state");
-            };
-            let val_str = val.to_string_lossy();
-            if val_str.is_empty() || val_str.starts_with("--") {
-                anyhow::bail!("Invalid path value after --state: {val_str}");
-            }
-            state_arg = Some(PathBuf::from(val));
+            state_arg = Some(parse_flag_value(&mut args, "--state")?);
         } else if let Some(val) = s.strip_prefix("--state=") {
             if val.is_empty() || val.starts_with("--") {
                 anyhow::bail!("Invalid path value in --state=: {val}");
             }
             state_arg = Some(PathBuf::from(val));
+        } else if s == "--work-dir" {
+            work_dir = Some(parse_flag_value(&mut args, "--work-dir")?);
         } else if s == "--cli-build" {
-            cli_build = true;
+            action = HelperAction::CliBuild;
+        } else if s == "--apply-built" {
+            action = HelperAction::ApplyBuilt { work_dir: None };
+        } else if s == "--restore" {
+            action = HelperAction::Restore {
+                delete_clones: false,
+            };
+        } else if s == "--delete-clones" {
+            delete_clones = true;
+        } else if s == "--import-zip" {
+            let zip_path = parse_flag_value(&mut args, "--import-zip")?;
+            action = HelperAction::ImportZip { zip_path };
         } else {
             anyhow::bail!("Unrecognized argument: {s}");
         }
     }
-    Ok((state_arg, cli_build))
+    if let HelperAction::ApplyBuilt { work_dir: wd } = &mut action {
+        *wd = work_dir;
+    }
+    if let HelperAction::Restore { delete_clones: dc } = &mut action {
+        *dc = delete_clones;
+    }
+    Ok((state_arg, action))
 }
 
 fn is_valid_temp_state_file(path: &Path) -> bool {
@@ -107,17 +145,41 @@ fn run_cli_build(state_arg: Option<PathBuf>) -> anyhow::Result<()> {
     })
 }
 
+fn run_helper_action(state_arg: Option<PathBuf>, action: HelperAction) -> anyhow::Result<()> {
+    if !is_admin() {
+        anyhow::bail!("Elevated helper requires Administrator privileges");
+    }
+    match action {
+        HelperAction::Gui => Ok(()),
+        HelperAction::CliBuild => run_cli_build(state_arg),
+        HelperAction::ApplyBuilt { work_dir } => {
+            let config = match state_arg.as_deref() {
+                Some(p) => AppState::load_config_from(p)?,
+                None => AppState::load_default_config().unwrap_or_default(),
+            };
+            let dir = work_dir.unwrap_or_else(built_fonts_dir);
+            apply_built_fonts_from_dir(&config, None, &dir, |_| {})?;
+            Ok(())
+        }
+        HelperAction::Restore { delete_clones } => restore_original_fonts(delete_clones),
+        HelperAction::ImportZip { zip_path } => {
+            import_and_apply_package(&zip_path)?;
+            Ok(())
+        }
+    }
+}
+
 fn main() {
-    let (state_arg, cli_build) = match parse_args() {
+    let (state_arg, action) = match parse_args() {
         Ok(v) => v,
         Err(e) => {
             eprintln!("Argument error: {e}");
             std::process::exit(2);
         }
     };
-    if cli_build {
-        if let Err(e) = run_cli_build(state_arg) {
-            eprintln!("CLI build failed: {e}");
+    if !matches!(action, HelperAction::Gui) {
+        if let Err(e) = run_helper_action(state_arg, action) {
+            eprintln!("Operation failed: {e}");
             std::process::exit(1);
         }
         return;

@@ -986,11 +986,12 @@ pub fn run_build_only(
     Ok(count)
 }
 
-/// Step 2: Backs up stock Segoe UI, validates built fonts from `<app>_data/work`,
+/// Step 2: Backs up stock Segoe UI, validates built fonts from `work_dir`,
 /// installs them to `%WINDIR%\Fonts`, updates HKLM Registry, and optionally clones stock Segoe UI.
-pub fn apply_built_fonts(
+pub fn apply_built_fonts_from_dir(
     config: &PersistedConfig,
     ff_exe: Option<&Path>,
+    work_dir: &Path,
     mut on_event: impl FnMut(BuildProgressEvent),
 ) -> anyhow::Result<usize> {
     on_event(BuildProgressEvent::Step {
@@ -1003,14 +1004,13 @@ pub fn apply_built_fonts(
         progress: 0.45,
         status: "Validating built fonts...".to_string(),
     });
-    let app_work = built_fonts_dir();
     let has_seguivar = windows_fonts_dir().join("SegUIVar.ttf").exists();
     let mut built_items: Vec<(&SegoeFontSpec, Vec<u8>)> = Vec::new();
     for spec in SEGOE_FONT_SPECS {
         if spec.is_variable && !has_seguivar {
             continue;
         }
-        let src = app_work.join(spec.mod_file);
+        let src = work_dir.join(spec.mod_file);
         if fs::symlink_metadata(&src).is_ok_and(|m| m.file_type().is_file()) {
             let bytes = fs::read(&src)?;
             if bytes.is_empty() || FontRef::new(&bytes).is_err() {
@@ -1039,6 +1039,14 @@ pub fn apply_built_fonts(
         status: "Applied! Reboot required to apply changes.".to_string(),
     });
     Ok(count)
+}
+
+pub fn apply_built_fonts(
+    config: &PersistedConfig,
+    ff_exe: Option<&Path>,
+    on_event: impl FnMut(BuildProgressEvent),
+) -> anyhow::Result<usize> {
+    apply_built_fonts_from_dir(config, ff_exe, &built_fonts_dir(), on_event)
 }
 
 /// Runs both Step 1 (build) and Step 2 (apply) sequentially (used by `--cli-build`).

@@ -9,13 +9,14 @@ use windows::Win32::Security::{
     TokenPrimary,
 };
 use windows::Win32::System::Threading::{
-    CREATE_UNICODE_ENVIRONMENT, CreateProcessWithTokenW, LOGON_WITH_PROFILE, OpenProcess,
-    OpenProcessToken, PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, STARTUPINFOW,
+    CREATE_UNICODE_ENVIRONMENT, CreateProcessWithTokenW, GetExitCodeProcess, INFINITE,
+    LOGON_WITH_PROFILE, OpenProcess, OpenProcessToken, PROCESS_INFORMATION,
+    PROCESS_QUERY_LIMITED_INFORMATION, STARTUPINFOW, WaitForSingleObject,
 };
-use windows::Win32::UI::Shell::{IsUserAnAdmin, SHELLEXECUTEINFOW, ShellExecuteExW};
-use windows::Win32::UI::WindowsAndMessaging::{
-    GetShellWindow, GetWindowThreadProcessId, SW_SHOWNORMAL,
+use windows::Win32::UI::Shell::{
+    IsUserAnAdmin, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW,
 };
+use windows::Win32::UI::WindowsAndMessaging::{GetShellWindow, GetWindowThreadProcessId, SW_HIDE};
 use windows::core::{PCWSTR, PWSTR, w};
 
 pub fn is_admin() -> bool {
@@ -57,33 +58,55 @@ pub fn quote_windows_arg(arg: &str) -> String {
     out
 }
 
-/// Relaunches the current executable with UAC elevation (`runas`), passing `--state <path>`.
-/// Returns `Ok(true)` if accepted, `Ok(false)` if cancelled by user (`ERROR_CANCELLED`).
-pub fn relaunch_elevated(state_path: &Path) -> anyhow::Result<bool> {
-    let state_str = state_path.to_string_lossy();
-    if state_str.chars().any(|c| c.is_control()) {
-        anyhow::bail!("Invalid control character in temporary state path");
+/// Runs the current executable elevated (`runas`) with the given arguments, waits for it
+/// to exit without closing the current GUI window, and checks its exit code.
+/// Returns `Ok(true)` on exit code 0, `Ok(false)` if UAC was cancelled.
+pub fn run_elevated_helper(args: &[String]) -> anyhow::Result<bool> {
+    let mut quoted_parts = Vec::with_capacity(args.len());
+    for a in args {
+        if a.chars().any(|c| c.is_control()) {
+            anyhow::bail!("Invalid control character in elevated helper argument");
+        }
+        quoted_parts.push(quote_windows_arg(a));
     }
 
     let exe = std::env::current_exe()?;
     let exe_w = to_wide_null(exe.as_os_str());
-    let params = format!("--state {}", quote_windows_arg(&state_str));
+    let params = quoted_parts.join(" ");
     let params_w = to_wide_null(OsStr::new(&params));
 
     let mut sei = SHELLEXECUTEINFOW {
         cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_NOCLOSEPROCESS,
         lpVerb: w!("runas"),
         lpFile: PCWSTR(exe_w.as_ptr()),
         lpParameters: PCWSTR(params_w.as_ptr()),
-        nShow: SW_SHOWNORMAL.0,
+        nShow: SW_HIDE.0,
         ..Default::default()
     };
 
     match unsafe { ShellExecuteExW(&mut sei) } {
-        Ok(()) => Ok(true),
-        Err(e) if e.code() == ERROR_CANCELLED.into() => Ok(false),
-        Err(e) => Err(anyhow::anyhow!("{e}")),
+        Ok(()) => {}
+        Err(e) if e.code() == ERROR_CANCELLED.into() => return Ok(false),
+        Err(e) => return Err(anyhow::anyhow!("{e}")),
     }
+
+    let h_proc = sei.hProcess;
+    if h_proc.is_invalid() {
+        anyhow::bail!("Elevated helper started without a process handle");
+    }
+
+    let mut exit_code = 1u32;
+    unsafe {
+        let _ = WaitForSingleObject(h_proc, INFINITE);
+        let _ = GetExitCodeProcess(h_proc, &mut exit_code);
+        let _ = CloseHandle(h_proc);
+    }
+
+    if exit_code != 0 {
+        anyhow::bail!("Elevated operation failed (exit code {exit_code})");
+    }
+    Ok(true)
 }
 
 /// Opens a folder in Windows Explorer, de-elevating via the desktop shell token when running as Admin.

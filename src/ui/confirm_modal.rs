@@ -4,7 +4,6 @@ use gpui::{
 };
 
 use crate::app_state::AppState;
-use crate::domain::elevation::relaunch_elevated;
 use crate::ui::components::{ButtonVariant, VantageButton};
 
 pub type ConfirmHandler = Box<dyn FnOnce(&mut Window, &mut App) + 'static>;
@@ -101,8 +100,8 @@ impl Render for ConfirmModal {
                 div()
                     .id("confirm-modal-card")
                     .occlude()
-                    .w_full()
-                    .max_w(px(440.0))
+                    .w(px(440.0))
+                    .max_w_full()
                     .bg(theme.surface)
                     .border_1()
                     .border_color(theme.line_2)
@@ -116,6 +115,8 @@ impl Render for ConfirmModal {
                     })
                     .child(
                         div()
+                            .w_full()
+                            .min_w_0()
                             .text_sm()
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(theme.text)
@@ -123,12 +124,16 @@ impl Render for ConfirmModal {
                     )
                     .child(
                         div()
+                            .w_full()
+                            .min_w_0()
                             .text_xs()
                             .text_color(theme.text_2)
                             .child(message),
                     )
                     .child(
                         div()
+                            .w_full()
+                            .flex_shrink_0()
                             .pt(px(4.0))
                             .flex()
                             .justify_end()
@@ -155,51 +160,4 @@ impl Render for ConfirmModal {
             )
             .into_any_element()
     }
-}
-
-/// Shared UAC elevation prompt + relaunch helper used across views.
-pub fn prompt_elevated_relaunch(
-    state: Entity<AppState>,
-    confirm_modal: &Entity<ConfirmModal>,
-    description: impl Into<String>,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    let state_clone = state.clone();
-    confirm_modal.update(cx, |m, cx| {
-        m.open(
-            ConfirmRequest {
-                title: "Administrator Privileges Required".to_string(),
-                message: description.into(),
-                confirm_label: "Relaunch Elevated".to_string(),
-                dangerous: false,
-                on_cancel: None,
-                on_confirm: Box::new(move |_, cx| {
-                    match state_clone.read(cx).save_temp_state() {
-                        Ok(state_path) => match relaunch_elevated(&state_path) {
-                            Ok(true) => std::process::exit(0),
-                            Ok(false) => {
-                                let _ = std::fs::remove_file(&state_path);
-                            }
-                            Err(e) => {
-                                let _ = std::fs::remove_file(&state_path);
-                                state_clone.update(cx, |s, cx| {
-                                    s.last_error = Some(format!("Elevation failed: {e}"));
-                                    cx.notify();
-                                });
-                            }
-                        },
-                        Err(e) => {
-                            state_clone.update(cx, |s, cx| {
-                                s.last_error = Some(format!("Failed to save temporary state: {e}"));
-                                cx.notify();
-                            });
-                        }
-                    }
-                }),
-            },
-            window,
-            cx,
-        );
-    });
 }

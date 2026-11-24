@@ -9,13 +9,14 @@ use rfd::AsyncFileDialog;
 
 use crate::app_state::{AppState, FontFamilySelection, NavTab, SecondaryScript};
 use crate::domain::builder::{
-    BuildProgressEvent, apply_built_fonts, has_built_fonts, is_trusted_ffpython_path,
-    resolve_trusted_fontforge, run_build_only,
+    BuildProgressEvent, apply_built_fonts, built_fonts_dir, has_built_fonts,
+    is_trusted_ffpython_path, resolve_trusted_fontforge, run_build_only,
 };
+use crate::domain::elevation::run_elevated_helper;
 use crate::domain::font_discovery::auto_detect_weights_for_style;
 use crate::domain::registry::{are_clones_installed, check_system_state, restore_original_fonts};
 use crate::ui::components::{BadgeTone, ButtonVariant, StatusPill, VantageButton};
-use crate::ui::confirm_modal::{ConfirmModal, ConfirmRequest, prompt_elevated_relaunch};
+use crate::ui::confirm_modal::{ConfirmModal, ConfirmRequest};
 use crate::ui::font_picker_modal::{FontPickerModal, FontTargetSlot};
 
 #[derive(Clone, Copy)]
@@ -398,37 +399,50 @@ impl HomeView {
             });
             return;
         }
-        if !s.is_admin {
-            prompt_elevated_relaunch(
-                self.state.clone(),
-                &self.confirm_modal,
-                "Applying built fonts to Windows requires Administrator privileges. Your built fonts are already saved—relaunch elevated to apply them now?",
-                window,
-                cx,
-            );
-            return;
-        }
 
+        let is_admin = s.is_admin;
         let state_handle = self.state.clone();
         self.confirm_modal.update(cx, |m, cx| {
             m.open(
                 ConfirmRequest {
                     title: "Apply Built Fonts to Windows".to_string(),
-                    message: "Install the built replacement fonts into Windows and update the Segoe UI Registry entries? A reboot will be required to apply system-wide.".to_string(),
+                    message: if is_admin {
+                        "Install the built replacement fonts into Windows and update the Segoe UI Registry entries? A reboot will be required to apply system-wide.".to_string()
+                    } else {
+                        "Install the built replacement fonts into Windows and update the Segoe UI Registry entries? Windows will ask for Administrator permission without closing TypeMod.".to_string()
+                    },
                     confirm_label: "Apply to Windows".to_string(),
                     dangerous: false,
                     on_cancel: None,
                     on_confirm: Box::new(move |_, cx| {
-                        let (cfg, ff_exe) = {
+                        let (cfg, ff_exe, temp_state_res) = {
                             let s = state_handle.read(cx);
                             if s.is_busy {
                                 return;
                             }
-                            (s.config.clone(), s.fontforge_path.clone())
+                            let temp_res = if !s.is_admin {
+                                Some(s.save_temp_state())
+                            } else {
+                                None
+                            };
+                            (s.config.clone(), s.fontforge_path.clone(), temp_res)
                         };
+
+                        let temp_state_path = match temp_state_res {
+                            Some(Ok(p)) => Some(p),
+                            Some(Err(e)) => {
+                                state_handle.update(cx, |s, cx| {
+                                    s.last_error = Some(format!("Failed to save state for helper: {e}"));
+                                    cx.notify();
+                                });
+                                return;
+                            }
+                            None => None,
+                        };
+
                         state_handle.update(cx, |s, cx| {
                             s.is_busy = true;
-                            s.progress = 0.10;
+                            s.progress = 0.15;
                             s.status_text = "Applying built fonts to Windows...".to_string();
                             s.last_error = None;
                             s.last_notice = None;
@@ -437,28 +451,46 @@ impl HomeView {
 
                         let state_bg = state_handle.clone();
                         cx.spawn(async move |cx| {
-                            let (res, sys_state, clones) = cx
+                            let (outcome, sys_state, clones) = cx
                                 .background_executor()
                                 .spawn(async move {
-                                    let res = apply_built_fonts(&cfg, ff_exe.as_deref(), |_| {});
+                                    let outcome = if let Some(ref state_path) = temp_state_path {
+                                        let args = vec![
+                                            "--apply-built".to_string(),
+                                            "--state".to_string(),
+                                            state_path.to_string_lossy().to_string(),
+                                            "--work-dir".to_string(),
+                                            built_fonts_dir().to_string_lossy().to_string(),
+                                        ];
+                                        let r = run_elevated_helper(&args);
+                                        let _ = std::fs::remove_file(state_path);
+                                        r
+                                    } else {
+                                        apply_built_fonts(&cfg, ff_exe.as_deref(), |_| {}).map(|_| true)
+                                    };
                                     let sys_state = check_system_state();
                                     let clones = are_clones_installed();
-                                    (res, sys_state, clones)
+                                    (outcome, sys_state, clones)
                                 })
                                 .await;
                             let _ = state_bg.update(cx, |s, cx| {
                                 s.is_busy = false;
                                 s.system_state = sys_state;
                                 s.clones_installed = clones;
-                                match res {
-                                    Ok(count) => {
+                                match outcome {
+                                    Ok(true) => {
                                         s.progress = 1.0;
                                         s.status_text =
                                             "Applied! Reboot required to apply changes."
                                                 .to_string();
-                                        s.last_notice = Some(format!(
-                                            "Applied {count} fonts! REBOOT REQUIRED to apply system-wide font changes."
-                                        ));
+                                        s.last_notice = Some(
+                                            "Applied! REBOOT REQUIRED to apply system-wide font changes."
+                                                .to_string(),
+                                        );
+                                    }
+                                    Ok(false) => {
+                                        s.progress = 1.0;
+                                        s.status_text = "Apply cancelled (UAC declined).".to_string();
                                     }
                                     Err(e) => {
                                         s.status_text = "Apply failed".to_string();
@@ -492,24 +524,18 @@ impl HomeView {
         if s.is_busy {
             return;
         }
-        if !s.is_admin {
-            prompt_elevated_relaunch(
-                self.state.clone(),
-                &self.confirm_modal,
-                "Restoring Windows system fonts requires Administrator privileges. Relaunch elevated now?",
-                window,
-                cx,
-            );
-            return;
-        }
 
         let has_clones = s.clones_installed;
         let state_handle = self.state.clone();
         let confirm_modal = self.confirm_modal.clone();
         let run_restore = move |delete_clones: bool, cx: &mut gpui::App| {
-            if state_handle.read(cx).is_busy {
-                return;
-            }
+            let is_admin = {
+                let s = state_handle.read(cx);
+                if s.is_busy {
+                    return;
+                }
+                s.is_admin
+            };
             let state_bg = state_handle.clone();
             state_handle.update(cx, |s, cx| {
                 s.is_busy = true;
@@ -521,7 +547,15 @@ impl HomeView {
                 let (res, sys_state, clones) = cx
                     .background_executor()
                     .spawn(async move {
-                        let res = restore_original_fonts(delete_clones);
+                        let res = if is_admin {
+                            restore_original_fonts(delete_clones).map(|()| true)
+                        } else {
+                            let mut args = vec!["--restore".to_string()];
+                            if delete_clones {
+                                args.push("--delete-clones".to_string());
+                            }
+                            run_elevated_helper(&args)
+                        };
                         let sys_state = check_system_state();
                         let clones = are_clones_installed();
                         (res, sys_state, clones)
@@ -529,15 +563,18 @@ impl HomeView {
                     .await;
                 let _ = state_bg.update(cx, |s, cx| {
                     s.is_busy = false;
+                    s.system_state = sys_state;
+                    s.clones_installed = clones;
                     match res {
-                        Ok(()) => {
-                            s.system_state = sys_state;
-                            s.clones_installed = clones;
+                        Ok(true) => {
                             s.last_error = None;
                             s.last_notice = Some(
                                 "Restored stock Segoe UI registry entries. REBOOT REQUIRED to finalize."
                                     .to_string(),
                             );
+                        }
+                        Ok(false) => {
+                            s.last_notice = Some("Restore cancelled (UAC declined).".to_string());
                         }
                         Err(e) => {
                             s.last_error = Some(format!("Restore failed: {e}"));

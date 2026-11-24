@@ -13,15 +13,13 @@ use crate::domain::backup_cloner::{
 use crate::domain::builder::{
     install_fontforge_via_winget, is_trusted_ffpython_path, resolve_trusted_fontforge,
 };
-use crate::domain::elevation::open_in_explorer;
+use crate::domain::elevation::{open_in_explorer, run_elevated_helper};
 use crate::domain::registry::{are_clones_installed, check_system_state};
 use crate::ui::components::{BadgeTone, ButtonVariant, StatusPill, ToggleSwitch, VantageButton};
-use crate::ui::confirm_modal::{ConfirmModal, prompt_elevated_relaunch};
 use crate::ui::theme::ThemeMode;
 
 pub struct SettingsView {
     state: Entity<AppState>,
-    confirm_modal: Entity<ConfirmModal>,
     dpi_track_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     is_dragging_dpi: bool,
     cached_backup: (usize, usize),
@@ -30,14 +28,9 @@ pub struct SettingsView {
 }
 
 impl SettingsView {
-    pub fn new(
-        state: Entity<AppState>,
-        confirm_modal: Entity<ConfirmModal>,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         let view = Self {
             state,
-            confirm_modal,
             dpi_track_bounds: Rc::new(Cell::new(None)),
             is_dragging_dpi: false,
             cached_backup: (0, 13),
@@ -218,21 +211,12 @@ impl SettingsView {
         .detach();
     }
 
-    fn import_zip_now(&self, window: &mut Window, cx: &mut Context<Self>) {
+    fn import_zip_now(&self, _window: &mut Window, cx: &mut Context<Self>) {
         let s = self.state.read(cx);
         if s.is_busy {
             return;
         }
-        if !s.is_admin {
-            prompt_elevated_relaunch(
-                self.state.clone(),
-                &self.confirm_modal,
-                "Importing and applying system font packages requires Administrator privileges. Relaunch elevated now?",
-                window,
-                cx,
-            );
-            return;
-        }
+        let is_admin = s.is_admin;
         self.state.update(cx, |s, cx| {
             s.is_busy = true;
             s.last_error = None;
@@ -256,25 +240,52 @@ impl SettingsView {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    let count = import_and_apply_package(&src_zip)?;
+                    let applied = if is_admin {
+                        let count = import_and_apply_package(&src_zip)?;
+                        Some(count)
+                    } else {
+                        let args = vec![
+                            "--import-zip".to_string(),
+                            src_zip.to_string_lossy().to_string(),
+                        ];
+                        if run_elevated_helper(&args)? {
+                            Some(0)
+                        } else {
+                            None
+                        }
+                    };
                     let bak = backup_status();
                     let sys_state = check_system_state();
                     let clones = are_clones_installed();
-                    Ok::<_, anyhow::Error>((count, src_zip, bak, sys_state, clones))
+                    Ok::<_, anyhow::Error>((applied, src_zip, bak, sys_state, clones))
                 })
                 .await;
             let _ = this.update(cx, |view, cx| match result {
-                Ok((count, src_zip, bak, sys_state, clones)) => {
+                Ok((Some(count), src_zip, bak, sys_state, clones)) => {
                     view.cached_backup = bak;
                     view.state.update(cx, |s, cx| {
                         s.is_busy = false;
                         s.system_state = sys_state;
                         s.clones_installed = clones;
                         s.last_error = None;
-                        s.last_notice = Some(format!(
-                            "Imported & applied {count} fonts from {}. REBOOT REQUIRED to apply system-wide.",
-                            src_zip.display()
-                        ));
+                        s.last_notice = Some(if count > 0 {
+                            format!(
+                                "Imported & applied {count} fonts from {}. REBOOT REQUIRED to apply system-wide.",
+                                src_zip.display()
+                            )
+                        } else {
+                            format!(
+                                "Imported & applied package {}. REBOOT REQUIRED to apply system-wide.",
+                                src_zip.display()
+                            )
+                        });
+                        cx.notify();
+                    });
+                }
+                Ok((None, _, _, _, _)) => {
+                    view.state.update(cx, |s, cx| {
+                        s.is_busy = false;
+                        s.last_notice = Some("Import cancelled (UAC declined).".to_string());
                         cx.notify();
                     });
                 }
