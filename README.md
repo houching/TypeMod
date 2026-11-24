@@ -39,8 +39,8 @@ cargo clippy --all-targets -- -D warnings
 cargo build --release
 ```
 
-When distributing the compiled binary, `typemod.exe` bundles the Python scripts internally (and `scripts/` is also included alongside the release archive).
+When distributing the compiled binary, `typemod.exe` bundles the Python scripts internally so it runs as a single standalone executable.
 
 ## CI / Releases
 
-GitHub Actions (`.github/workflows/release.yml`) runs `cargo test`, `cargo clippy --all-targets -- -D warnings`, builds `typemod.exe` in release mode on `windows-latest`, and packages `typemod.exe` + `scripts/` + `README.md` into `typemod-windows-x64.zip` (published automatically to GitHub Releases on `v*` tags).
+GitHub Actions (`.github/workflows/release.yml`) runs `cargo test`, `cargo clippy --all-targets -- -D warnings`, builds `typemod.exe` in release mode on `windows-latest`, and packages `typemod.exe` + `README.md` into `typemod-windows-x64.zip` (published automatically to GitHub Releases on `v*` tags).
