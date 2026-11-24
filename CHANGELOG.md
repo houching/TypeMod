@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Split the workflow into distinct **Build**, **Preview**, and **Apply** stages.
 - Updated UAC elevation actions to run in-place and fixed modal layout issues.
 - Improved UI responsiveness across the home view, settings, font picker modal, and text inputs.
+- Virtualized the log drawer, isolated scrollbar/cursor blink updates, and offloaded startup and config I/O.
+- Added Apache-2.0 `LICENSE`, `THIRD_PARTY_LICENSES.md`, `CONTRIBUTING.md`, `.github/SECURITY.md`, issue templates, Windows `VERSIONINFO` metadata, and updated `README.md` + release packaging.
 - Suppressed the console window in release builds.
 - Omitted the redundant `scripts` folder from the Windows release zip package.
 - Scoped release workflow permissions (`contents: write` on the release job) and refined CI caching.
