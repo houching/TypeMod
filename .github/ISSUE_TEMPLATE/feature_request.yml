@@ -1,0 +1,19 @@
+name: Feature Request
+description: Suggest a new feature or improvement for TypeMod
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What would you like TypeMod to do?
+    validations:
+      required: true
+  - type: textarea
+    id: rationale
+    attributes:
+      label: Use Case
+      description: Why is this useful or what problem does it solve?
+    validations:
+      required: false

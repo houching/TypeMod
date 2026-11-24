@@ -2,7 +2,12 @@
 name = "typemod"
 version = "0.1.1"
 edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/houching/TypeMod"
+homepage = "https://github.com/houching/TypeMod"
 description = "Windows system font replacement and metrics tool in Rust + GPUI with English/Latin + Khmer support"
+keywords = ["windows", "font", "segoe-ui", "gpui", "khmer"]
+categories = ["gui", "os::windows-apis"]
 
 [dependencies]
 anyhow = "1.0"
